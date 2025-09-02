@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.30;
 
-import {GaslessCrossChainOrder, OnchainCrossChainOrder, ResolvedCrossChainOrder, Open} from "./interfaces/IERC7683.sol";
-import {IOriginSettler} from "./interfaces/IOriginSettler.sol";
-import {INexusSettler} from "./interfaces/INexusSettler.sol";
 import {EIP712} from "lib/openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
 import {CAIP2} from "lib/openzeppelin-contracts/contracts/utils/CAIP2.sol";
 import {CAIP10} from "lib/openzeppelin-contracts/contracts/utils/CAIP10.sol";
 import {Strings} from "lib/openzeppelin-contracts/contracts/utils/Strings.sol";
+import {GaslessCrossChainOrder, OnchainCrossChainOrder, ResolvedCrossChainOrder, Open} from "./interfaces/IERC7683.sol";
+import {IOriginSettler} from "./interfaces/IOriginSettler.sol";
+import {INexusSettler} from "./interfaces/INexusSettler.sol";
 
 contract NexusSettler is EIP712, IOriginSettler, INexusSettler {
     using Strings for string;
