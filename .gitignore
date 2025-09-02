@@ -13,3 +13,7 @@ states/
 # Optional
 .env
 .env.local
+.DS_Store
+cache/
+out/
+broadcast/
