@@ -3,13 +3,22 @@ pragma solidity 0.8.30;
 
 interface INexusSettler {
     enum ActionType {
-        FUND
+        LOCK,
+        TRANSFER,
+        SWAP
+    }
+
+    struct Venue {
+        string target;
+        bytes callData;
+        uint256 value;
     }
 
     struct Action {
         ActionType actionType;
         string domain;
-        bytes data;
+        bytes32 settler;
+        Venue[] venue;
     }
 
     struct Intent {
@@ -22,4 +31,11 @@ interface INexusSettler {
 
     error InvalidOrderDataType();
     error InvalidDomain();
+    error InvalidOrderId();
+    error InvalidSender();
+    error OrderSent();
+    error OrderFilled();
+
+    event Executed(bytes32 indexed orderId, ActionType indexed actionType, Action action);
+    event Filled(bytes32 indexed orderId);
 }

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.30;
 
-import {GaslessCrossChainOrder, OnchainCrossChainOrder, ResolvedCrossChainOrder} from "./IERC7683.sol";
+import {IERC7683} from "./IERC7683.sol";
 
 /// @title IOriginSettler
 /// @notice Standard interface for settlement contracts on the origin chain
-interface IOriginSettler {
-	/// @notice Opens a gasless crosschain order on behalf of a user.
+interface IOriginSettler is IERC7683 {
+	/// @notice Opens a gasless cross-chain order on behalf of a user.
 	/// @dev To be called by the filler.
 	/// @dev This method must emit the Open event
 	/// @param order The GaslessCrossChainOrder definition
@@ -14,7 +14,7 @@ interface IOriginSettler {
 	/// @param originFillerData Any filler-defined data required by the settler
 	function openFor(GaslessCrossChainOrder calldata order, bytes calldata signature, bytes calldata originFillerData) external;
 
-	/// @notice Opens a crosschain order
+	/// @notice Opens a cross-chain order
 	/// @dev To be called by the user
 	/// @dev This method must emit the Open event
 	/// @param order The OnchainCrossChainOrder definition
