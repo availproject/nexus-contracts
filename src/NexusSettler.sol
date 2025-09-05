@@ -16,14 +16,17 @@ contract NexusSettler is EIP712, IERC7683, IDestinationSettler, IOriginSettler, 
     using CAIP2 for string;
     using Strings for string;
 
-    bytes32 private constant INTENT_TYPEHASH = keccak256("Intent(Action[] actions,bytes32 sender,bytes32 recipient,string domain,uint256 nonce)");
+    bytes32 private constant INTENT_TYPEHASH =
+        keccak256("Intent(Action[] actions,bytes32 sender,bytes32 recipient,string domain,uint256 nonce)");
 
     mapping(bytes32 => bool) ordersSent;
     mapping(bytes32 => bool) ordersFilled;
 
     constructor() EIP712("NexusSettler", "1") {}
 
-    function openFor(GaslessCrossChainOrder calldata order, bytes calldata signature, bytes calldata originFillerData) external {
+    function openFor(GaslessCrossChainOrder calldata order, bytes calldata signature, bytes calldata originFillerData)
+        external
+    {
         // Implementation goes here
     }
 
@@ -37,11 +40,11 @@ contract NexusSettler is EIP712, IERC7683, IDestinationSettler, IOriginSettler, 
         require(keccak256(originData) == orderId, InvalidOrderId());
         OnchainCrossChainOrder memory order = abi.decode(originData, (OnchainCrossChainOrder));
         Intent memory intent = abi.decode(order.orderData, (Intent));
-        for(uint256 i = 0; i < intent.actions.length;) {
+        for (uint256 i = 0; i < intent.actions.length;) {
             Action memory action = intent.actions[i];
             if (action.domain.equal(CAIP2.local())) {
                 emit Executed(orderId, action.actionType, action);
-                for(uint256 j = 0; j < action.venue.length;) {
+                for (uint256 j = 0; j < action.venue.length;) {
                     Venue memory venue = action.venue[j];
                     address target = venue.target.parseAddress();
                     target.functionCallWithValue(venue.callData, venue.value);
@@ -57,11 +60,21 @@ contract NexusSettler is EIP712, IERC7683, IDestinationSettler, IOriginSettler, 
         emit Filled(orderId);
     }
 
-    function resolveFor(GaslessCrossChainOrder calldata order, bytes calldata originFillerData) external view override returns (ResolvedCrossChainOrder memory) {
+    function resolveFor(GaslessCrossChainOrder calldata order, bytes calldata originFillerData)
+        external
+        view
+        override
+        returns (ResolvedCrossChainOrder memory)
+    {
         // Implementation goes here
     }
 
-    function resolve(OnchainCrossChainOrder calldata order) external view override returns (ResolvedCrossChainOrder memory) {
+    function resolve(OnchainCrossChainOrder calldata order)
+        external
+        view
+        override
+        returns (ResolvedCrossChainOrder memory)
+    {
         return _resolve(order);
     }
 
@@ -75,7 +88,7 @@ contract NexusSettler is EIP712, IERC7683, IDestinationSettler, IOriginSettler, 
         Output[] memory maxSpent = new Output[](0);
         Output[] memory minReceived = new Output[](0);
         FillInstruction[] memory fillInstructions = new FillInstruction[](intent.actions.length);
-        for(uint256 i = 0; i < intent.actions.length;) {
+        for (uint256 i = 0; i < intent.actions.length;) {
             Action memory action = intent.actions[i];
             (string memory namespace, string memory ref) = action.domain.parse();
             require(namespace.equal("eip155"), InvalidDomain());

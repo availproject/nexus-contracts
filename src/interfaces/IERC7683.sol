@@ -40,7 +40,6 @@ interface IERC7683 {
         bytes orderData;
     }
 
-
     /// @title ResolvedCrossChainOrder type
     /// @notice An implementation-generic representation of an order intended for filler consumption
     /// @dev Defines all requirements for filling an order by unbundling the implementation-specific orderData.
@@ -56,14 +55,13 @@ interface IERC7683 {
         uint32 fillDeadline;
         /// @dev The unique identifier for this order within this settlement system
         bytes32 orderId;
-
         /// @dev The max outputs that the filler will send. It's possible the actual amount depends on the state of the destination
         ///      chain (destination dutch auction, for instance), so these outputs should be considered a cap on filler liabilities.
         Output[] maxSpent;
         /// @dev The minimum outputs that must be given to the filler as part of order settlement. Similar to maxSpent, it's possible
         ///      that special order types may not be able to guarantee the exact amount at open time, so this should be considered
         ///      a floor on filler receipts. Setting the `recipient` of an `Output` to address(0) indicates that the filler is not
-            ///      known when creating this order.
+        ///      known when creating this order.
         Output[] minReceived;
         /// @dev Each instruction in this array is parameterizes a single leg of the fill. This provides the filler with the information
         ///      necessary to perform the fill on the destination(s).
