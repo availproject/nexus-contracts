@@ -40,6 +40,8 @@ interface INexusSettler {
 
     error InvalidOrderDataType();
     error InvalidDomain();
+    error InvalidLock();
+    error InvalidOutput();
     error InvalidOrderId();
     error InvalidSender();
     error OrderSent();

@@ -5,18 +5,27 @@ import {EIP712} from "lib/openzeppelin-contracts/contracts/utils/cryptography/EI
 import {Address} from "lib/openzeppelin-contracts/contracts/utils/Address.sol";
 import {CAIP2} from "lib/openzeppelin-contracts/contracts/utils/CAIP2.sol";
 import {Strings} from "lib/openzeppelin-contracts/contracts/utils/Strings.sol";
+import {SlotDerivation} from "lib/openzeppelin-contracts/contracts/utils/SlotDerivation.sol";
+import {TransientSlot} from "lib/openzeppelin-contracts/contracts/utils/TransientSlot.sol";
+import {ReentrancyGuardTransient} from "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuardTransient.sol";
+import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {IERC7683} from "./interfaces/IERC7683.sol";
 import {IDestinationSettler} from "./interfaces/IDestinationSettler.sol";
 import {IOriginSettler} from "./interfaces/IOriginSettler.sol";
 import {INexusSettler} from "./interfaces/INexusSettler.sol";
 
-contract NexusSettler is EIP712, IERC7683, IDestinationSettler, IOriginSettler, INexusSettler {
+contract NexusSettler is ReentrancyGuardTransient, EIP712, IERC7683, IDestinationSettler, IOriginSettler, INexusSettler {
     using Address for address;
     using CAIP2 for string;
     using Strings for string;
+    using SlotDerivation for bytes32;
+    using TransientSlot for *;
 
     bytes32 private constant INTENT_TYPEHASH =
         keccak256("Intent(Action[] actions,bytes32 sender,bytes32 recipient,string domain,uint256 nonce)");
+    // transient mappings
+    bytes32 private constant _ALLOWANCES_NAMESPACE = keccak256(abi.encodePacked("nexus-settler/allowances"));
+    bytes32 private constant _BALANCES_NAMESPACE = keccak256(abi.encodePacked("nexus-settler/balances"));
 
     mapping(bytes32 => bool) ordersSent;
     mapping(bytes32 => bool) ordersFilled;
@@ -35,13 +44,48 @@ contract NexusSettler is EIP712, IERC7683, IDestinationSettler, IOriginSettler, 
         ordersSent[resolvedOrder.orderId] = true;
     }
 
-    function fill(bytes32 orderId, bytes calldata originData, bytes calldata) external {
+    function fill(bytes32 orderId, bytes calldata originData, bytes calldata) nonReentrant external {
         require(keccak256(originData) == orderId, InvalidOrderId());
         OnchainCrossChainOrder memory order = abi.decode(originData, (OnchainCrossChainOrder));
         Intent memory intent = abi.decode(order.orderData, (Intent));
-        for (uint256 i = 0; i < intent.actions.length;) {
+        string memory localDomain = CAIP2.local();
+        Resource[] memory locks = new Resource[](intent.locks.length);
+        Resource[] memory outputs = new Resource[](intent.outputs.length);
+        address owner = address(bytes20(intent.sender));
+        uint256 localLocks;
+        uint256 localOutputs;
+        uint256 i;
+        // 1. check locks pertaining to this domain
+        for (i = 0; i < intent.locks.length;) {
+            Resource memory resource = intent.locks[i];
+            if (resource.domain.equal(localDomain)) {
+                locks[localLocks] = resource;
+                IERC20 token = IERC20(address(bytes20(resource.token)));
+                address recipient = address(bytes20(resource.recipient));
+                _setAllowance(owner, recipient, address(token), token.allowance(owner, recipient));
+                unchecked { ++localLocks; }
+            }
+            unchecked {
+                ++i;
+            }
+        }
+        // 2. check outputs pertaining to this domain
+        for (i = 0; i < intent.outputs.length;) {
+            Resource memory resource = intent.outputs[i];
+            if (resource.domain.equal(localDomain)) {
+                outputs[localOutputs] = resource;
+                IERC20 token = IERC20(address(bytes20(resource.token)));
+                _setBalance(owner, address(token), token.balanceOf(address(bytes20(resource.recipient))));
+                unchecked { ++localOutputs; }
+            }
+            unchecked {
+                ++i;
+            }
+        }
+        // 3. execute all actions pertaining to this domain
+        for (; i < intent.actions.length;) {
             Action memory action = intent.actions[i];
-            if (action.domain.equal(CAIP2.local())) {
+            if (action.domain.equal(localDomain)) {
                 emit Executed(orderId, action.actionType, action);
                 for (uint256 j = 0; j < action.venue.length;) {
                     Venue memory venue = action.venue[j];
@@ -51,6 +95,34 @@ contract NexusSettler is EIP712, IERC7683, IDestinationSettler, IOriginSettler, 
                         ++j;
                     }
                 }
+            }
+            unchecked {
+                ++i;
+            }
+        }
+        // 4. validate locks pertaining to this domain
+        for (i = 0; i < localLocks;) {
+            Resource memory resource = intent.locks[i];
+            if (resource.domain.equal(localDomain)) {
+                locks[localLocks] = resource;
+                IERC20 token = IERC20(address(bytes20(resource.token)));
+                address recipient = address(bytes20(resource.recipient));
+                uint256 oldAllowance = _allowances(owner, recipient, address(token));
+                require(token.allowance(owner, recipient) >= oldAllowance + resource.amount, InvalidLock());
+            }
+            unchecked {
+                ++i;
+            }
+        }
+        // 5. validate outputs pertaining to this domain
+        for (i = 0; i < localOutputs;) {
+            Resource memory resource = intent.outputs[i];
+            if (resource.domain.equal(localDomain)) {
+                outputs[localOutputs] = resource;
+                IERC20 token = IERC20(address(bytes20(resource.token)));
+                address recipient = address(bytes20(resource.recipient));
+                uint256 oldBalance = _balances(recipient, address(token));
+                require(token.balanceOf(recipient) >= oldBalance + resource.amount, InvalidLock());
             }
             unchecked {
                 ++i;
@@ -83,7 +155,7 @@ contract NexusSettler is EIP712, IERC7683, IDestinationSettler, IOriginSettler, 
         require(order.orderDataType == INTENT_TYPEHASH, InvalidOrderDataType());
         Intent memory intent = abi.decode(order.orderData, (Intent));
         require(intent.domain.equal(CAIP2.local()), InvalidDomain());
-        require(intent.sender == bytes32(uint256(uint160(msg.sender))), InvalidSender());
+        require(intent.sender == bytes32(bytes20(msg.sender)), InvalidSender());
         Output[] memory maxSpent = new Output[](intent.locks.length);
         Output[] memory minReceived = new Output[](intent.outputs.length);
         FillInstruction[] memory fillInstructions = new FillInstruction[](intent.actions.length);
@@ -139,6 +211,22 @@ contract NexusSettler is EIP712, IERC7683, IDestinationSettler, IOriginSettler, 
             minReceived: minReceived,
             fillInstructions: fillInstructions
         });
+    }
+
+    function _setAllowance(address owner, address spender, address token, uint256 amount) private {
+        _ALLOWANCES_NAMESPACE.deriveMapping(owner).deriveMapping(spender).deriveMapping(token).asUint256().tstore(amount);
+    }
+
+    function _setBalance(address recipient, address token, uint256 amount) private {
+        _BALANCES_NAMESPACE.deriveMapping(recipient).deriveMapping(token).asUint256().tstore(amount);
+    }
+
+    function _allowances(address owner, address spender, address token) private view returns (uint256) {
+        return _ALLOWANCES_NAMESPACE.deriveMapping(owner).deriveMapping(spender).deriveMapping(token).asUint256().tload();
+    }
+
+    function _balances(address recipient, address token) private view returns (uint256) {
+        return _BALANCES_NAMESPACE.deriveMapping(recipient).deriveMapping(token).asUint256().tload();
     }
 }
 
