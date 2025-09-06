@@ -4,7 +4,6 @@ pragma solidity 0.8.30;
 import {EIP712} from "lib/openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
 import {Address} from "lib/openzeppelin-contracts/contracts/utils/Address.sol";
 import {CAIP2} from "lib/openzeppelin-contracts/contracts/utils/CAIP2.sol";
-import {CAIP10} from "lib/openzeppelin-contracts/contracts/utils/CAIP10.sol";
 import {Strings} from "lib/openzeppelin-contracts/contracts/utils/Strings.sol";
 import {IERC7683} from "./interfaces/IERC7683.sol";
 import {IDestinationSettler} from "./interfaces/IDestinationSettler.sol";
@@ -85,10 +84,39 @@ contract NexusSettler is EIP712, IERC7683, IDestinationSettler, IOriginSettler, 
         Intent memory intent = abi.decode(order.orderData, (Intent));
         require(intent.domain.equal(CAIP2.local()), InvalidDomain());
         require(intent.sender == bytes32(uint256(uint160(msg.sender))), InvalidSender());
-        Output[] memory maxSpent = new Output[](0);
-        Output[] memory minReceived = new Output[](0);
+        Output[] memory maxSpent = new Output[](intent.locks.length);
+        Output[] memory minReceived = new Output[](intent.outputs.length);
         FillInstruction[] memory fillInstructions = new FillInstruction[](intent.actions.length);
-        for (uint256 i = 0; i < intent.actions.length;) {
+        uint256 i;
+        for (; i < intent.locks.length;) {
+            Resource memory resource = intent.locks[i];
+            (string memory namespace, string memory ref) = resource.domain.parse();
+            require(namespace.equal("eip155"), InvalidDomain());
+            maxSpent[i] = Output({
+                token: resource.token,
+                amount: resource.amount,
+                recipient: resource.recipient,
+                chainId: ref.parseUint()
+            });
+            unchecked {
+                ++i;
+            }
+        }
+        for (i = 0; i < intent.outputs.length;) {
+            Resource memory resource = intent.outputs[i];
+            (string memory namespace, string memory ref) = resource.domain.parse();
+            require(namespace.equal("eip155"), InvalidDomain());
+            maxSpent[i] = Output({
+                token: resource.token,
+                amount: resource.amount,
+                recipient: resource.recipient,
+                chainId: ref.parseUint()
+            });
+            unchecked {
+                ++i;
+            }
+        }
+        for (i = 0; i < intent.actions.length;) {
             Action memory action = intent.actions[i];
             (string memory namespace, string memory ref) = action.domain.parse();
             require(namespace.equal("eip155"), InvalidDomain());

@@ -21,8 +21,17 @@ interface INexusSettler {
         Venue[] venue;
     }
 
+    struct Resource {
+        bytes32 token;
+        uint256 amount;
+        bytes32 recipient;
+        string domain;
+    }
+
     struct Intent {
         Action[] actions;
+        Resource[] locks;
+        Resource[] outputs;
         bytes32 sender;
         bytes32 recipient;
         string domain;
