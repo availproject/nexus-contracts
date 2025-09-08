@@ -34,7 +34,7 @@ contract NexusSettler is
     bytes32 private constant _ALLOWANCES_NAMESPACE = keccak256(abi.encodePacked("nexus-settler/allowances"));
     bytes32 private constant _BALANCES_NAMESPACE = keccak256(abi.encodePacked("nexus-settler/balances"));
 
-    mapping(bytes32 => bool) transient ordersSent;
+    mapping(bytes32 => bool) ordersSent;
     mapping(bytes32 => bool) ordersFilled;
 
     constructor() EIP712("NexusSettler", "1") {}
