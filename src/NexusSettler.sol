@@ -14,7 +14,14 @@ import {IDestinationSettler} from "./interfaces/IDestinationSettler.sol";
 import {IOriginSettler} from "./interfaces/IOriginSettler.sol";
 import {INexusSettler} from "./interfaces/INexusSettler.sol";
 
-contract NexusSettler is ReentrancyGuardTransient, EIP712, IERC7683, IDestinationSettler, IOriginSettler, INexusSettler {
+contract NexusSettler is
+    ReentrancyGuardTransient,
+    EIP712,
+    IERC7683,
+    IDestinationSettler,
+    IOriginSettler,
+    INexusSettler
+{
     using Address for address;
     using CAIP2 for string;
     using Strings for string;
@@ -27,7 +34,7 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, IERC7683, IDestinatio
     bytes32 private constant _ALLOWANCES_NAMESPACE = keccak256(abi.encodePacked("nexus-settler/allowances"));
     bytes32 private constant _BALANCES_NAMESPACE = keccak256(abi.encodePacked("nexus-settler/balances"));
 
-    mapping(bytes32 => bool) ordersSent;
+    mapping(bytes32 => bool) transient ordersSent;
     mapping(bytes32 => bool) ordersFilled;
 
     constructor() EIP712("NexusSettler", "1") {}
@@ -44,7 +51,7 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, IERC7683, IDestinatio
         ordersSent[resolvedOrder.orderId] = true;
     }
 
-    function fill(bytes32 orderId, bytes calldata originData, bytes calldata) nonReentrant external {
+    function fill(bytes32 orderId, bytes calldata originData, bytes calldata) external nonReentrant {
         require(keccak256(originData) == orderId, InvalidOrderId());
         OnchainCrossChainOrder memory order = abi.decode(originData, (OnchainCrossChainOrder));
         Intent memory intent = abi.decode(order.orderData, (Intent));
@@ -63,7 +70,9 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, IERC7683, IDestinatio
                 IERC20 token = IERC20(address(bytes20(resource.token)));
                 address recipient = address(bytes20(resource.recipient));
                 _setAllowance(owner, recipient, address(token), token.allowance(owner, recipient));
-                unchecked { ++localLocks; }
+                unchecked {
+                    ++localLocks;
+                }
             }
             unchecked {
                 ++i;
@@ -76,7 +85,9 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, IERC7683, IDestinatio
                 outputs[localOutputs] = resource;
                 IERC20 token = IERC20(address(bytes20(resource.token)));
                 _setBalance(owner, address(token), token.balanceOf(address(bytes20(resource.recipient))));
-                unchecked { ++localOutputs; }
+                unchecked {
+                    ++localOutputs;
+                }
             }
             unchecked {
                 ++i;
@@ -214,7 +225,9 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, IERC7683, IDestinatio
     }
 
     function _setAllowance(address owner, address spender, address token, uint256 amount) private {
-        _ALLOWANCES_NAMESPACE.deriveMapping(owner).deriveMapping(spender).deriveMapping(token).asUint256().tstore(amount);
+        _ALLOWANCES_NAMESPACE.deriveMapping(owner).deriveMapping(spender).deriveMapping(token).asUint256().tstore(
+            amount
+        );
     }
 
     function _setBalance(address recipient, address token, uint256 amount) private {
@@ -222,7 +235,8 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, IERC7683, IDestinatio
     }
 
     function _allowances(address owner, address spender, address token) private view returns (uint256) {
-        return _ALLOWANCES_NAMESPACE.deriveMapping(owner).deriveMapping(spender).deriveMapping(token).asUint256().tload();
+        return
+            _ALLOWANCES_NAMESPACE.deriveMapping(owner).deriveMapping(spender).deriveMapping(token).asUint256().tload();
     }
 
     function _balances(address recipient, address token) private view returns (uint256) {
