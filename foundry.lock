@@ -1,4 +1,10 @@
 {
+  "lib/XERC7683": {
+    "branch": {
+      "name": "master",
+      "rev": "235b0d3830d54052574cb38eff260d98b34bb23c"
+    }
+  },
   "lib/forge-std": {
     "tag": {
       "name": "v1.10.0",

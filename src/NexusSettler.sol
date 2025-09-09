@@ -9,17 +9,23 @@ import {SlotDerivation} from "lib/openzeppelin-contracts/contracts/utils/SlotDer
 import {TransientSlot} from "lib/openzeppelin-contracts/contracts/utils/TransientSlot.sol";
 import {ReentrancyGuardTransient} from "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuardTransient.sol";
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import {IXERC7683} from "lib/XERC7683/src/IXERC7683.sol";
+import {IXOriginSettler} from "lib/XERC7683/src/IXOriginSettler.sol";
+import {IXDestinationSettler} from "lib/XERC7683/src/IXDestinationSettler.sol";
 import {IERC7683} from "./interfaces/IERC7683.sol";
-import {IDestinationSettler} from "./interfaces/IDestinationSettler.sol";
 import {IOriginSettler} from "./interfaces/IOriginSettler.sol";
+import {IDestinationSettler} from "./interfaces/IDestinationSettler.sol";
 import {INexusSettler} from "./interfaces/INexusSettler.sol";
 
 contract NexusSettler is
     ReentrancyGuardTransient,
     EIP712,
     IERC7683,
-    IDestinationSettler,
+    IXERC7683,
     IOriginSettler,
+    IXOriginSettler,
+    IDestinationSettler,
+    IXDestinationSettler,
     INexusSettler
 {
     using Address for address;
@@ -45,13 +51,19 @@ contract NexusSettler is
         // Implementation goes here
     }
 
-    function open(OnchainCrossChainOrder calldata order) external {
+    function openFor(XGaslessCrossChainOrder calldata order, bytes calldata signature, bytes calldata originFillerData)
+        external 
+    {
+        // Implementation goes here
+    }
+
+    function open(OnchainCrossChainOrder calldata order) override external {
         ResolvedCrossChainOrder memory resolvedOrder = _resolve(order);
         emit Open(resolvedOrder.orderId, resolvedOrder);
         ordersSent[resolvedOrder.orderId] = true;
     }
 
-    function fill(bytes32 orderId, bytes calldata originData, bytes calldata) external nonReentrant {
+    function fill(bytes32 orderId, bytes calldata originData, bytes calldata) override(IDestinationSettler, IXDestinationSettler) external nonReentrant {
         require(keccak256(originData) == orderId, InvalidOrderId());
         OnchainCrossChainOrder memory order = abi.decode(originData, (OnchainCrossChainOrder));
         Intent memory intent = abi.decode(order.orderData, (Intent));
@@ -151,6 +163,15 @@ contract NexusSettler is
         // Implementation goes here
     }
 
+    function resolveFor(XGaslessCrossChainOrder calldata order, bytes calldata originFillerData)
+        external
+        view
+        override
+        returns (XResolvedCrossChainOrder memory)
+    {
+        // Implementation goes here
+    }
+
     function resolve(OnchainCrossChainOrder calldata order)
         external
         view
@@ -158,6 +179,14 @@ contract NexusSettler is
         returns (ResolvedCrossChainOrder memory)
     {
         return _resolve(order);
+    }
+
+    function xresolve(XOnchainCrossChainOrder calldata order)
+        external
+        view
+        returns (XResolvedCrossChainOrder memory)
+    {
+        // Implementation goes here
     }
 
     function _resolve(OnchainCrossChainOrder calldata order) private view returns (ResolvedCrossChainOrder memory) {

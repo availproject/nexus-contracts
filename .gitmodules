@@ -4,3 +4,7 @@
 [submodule "lib/openzeppelin-contracts"]
 	path = lib/openzeppelin-contracts
 	url = https://github.com/openzeppelin/openzeppelin-contracts
+[submodule "lib/XERC7683"]
+	path = lib/XERC7683
+	url = https://github.com/QEDK/XERC7683
+	branch = master
