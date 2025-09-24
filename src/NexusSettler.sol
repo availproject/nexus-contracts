@@ -9,6 +9,7 @@ import {SlotDerivation} from "lib/openzeppelin-contracts/contracts/utils/SlotDer
 import {TransientSlot} from "lib/openzeppelin-contracts/contracts/utils/TransientSlot.sol";
 import {ReentrancyGuardTransient} from "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuardTransient.sol";
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IXERC7683} from "lib/XERC7683/src/IXERC7683.sol";
 import {IXOriginSettler} from "lib/XERC7683/src/IXOriginSettler.sol";
 import {IXDestinationSettler} from "lib/XERC7683/src/IXDestinationSettler.sol";
@@ -32,18 +33,23 @@ contract NexusSettler is
     using CAIP2 for string;
     using Strings for string;
     using SlotDerivation for bytes32;
+    using SafeERC20 for IERC20;
     using TransientSlot for *;
 
     bytes32 private constant INTENT_TYPEHASH =
-        keccak256("Intent(Action[] actions,bytes32 sender,bytes32 recipient,string domain,uint256 nonce)");
+        keccak256("Intent(string domain,Actions[] batch,bytes32 sender,bytes32 recipient,uint256 nonce)");
     // transient mappings
     bytes32 private constant _ALLOWANCES_NAMESPACE = keccak256(abi.encodePacked("nexus-settler/allowances"));
     bytes32 private constant _BALANCES_NAMESPACE = keccak256(abi.encodePacked("nexus-settler/balances"));
 
+    address public immutable escrow;
+
     mapping(bytes32 => bool) ordersSent;
     mapping(bytes32 => bool) ordersFilled;
 
-    constructor() EIP712("NexusSettler", "1") {}
+    constructor(address newEscrow) EIP712("NexusSettler", "1") {
+        escrow = newEscrow;
+    }
 
     function openFor(GaslessCrossChainOrder calldata order, bytes calldata signature, bytes calldata originFillerData)
         external
@@ -65,32 +71,31 @@ contract NexusSettler is
 
     function fill(bytes32 orderId, bytes calldata originData, bytes calldata) override(IDestinationSettler, IXDestinationSettler) external nonReentrant {
         require(keccak256(originData) == orderId, InvalidOrderId());
+        require(!ordersFilled[orderId], OrderFilled());
         OnchainCrossChainOrder memory order = abi.decode(originData, (OnchainCrossChainOrder));
         Intent memory intent = abi.decode(order.orderData, (Intent));
         string memory localDomain = CAIP2.local();
-        Resource[] memory locks = new Resource[](intent.locks.length);
         Resource[] memory outputs = new Resource[](intent.outputs.length);
         address owner = address(bytes20(intent.sender));
-        uint256 localLocks;
         uint256 localOutputs;
         uint256 i;
-        // 1. check locks pertaining to this domain
-        for (i = 0; i < intent.locks.length;) {
-            Resource memory resource = intent.locks[i];
-            if (resource.domain.equal(localDomain)) {
-                locks[localLocks] = resource;
-                IERC20 token = IERC20(address(bytes20(resource.token)));
-                address recipient = address(bytes20(resource.recipient));
-                _setAllowance(owner, recipient, address(token), token.allowance(owner, recipient));
-                unchecked {
-                    ++localLocks;
-                }
+        Actions memory batch;
+        // extract batch for this domain
+        bool flag = false;
+        for (; i < intent.batch.length;) {
+            Actions memory actions = intent.batch[i];
+            if (actions.domain.equal(localDomain)) {
+                batch = intent.batch[i];
+                flag = true;
+                break;
             }
             unchecked {
                 ++i;
             }
         }
-        // 2. check outputs pertaining to this domain
+        // no valid batch found
+        require(flag, InvalidDomain());
+        // 1. check outputs pertaining to this domain
         for (i = 0; i < intent.outputs.length;) {
             Resource memory resource = intent.outputs[i];
             if (resource.domain.equal(localDomain)) {
@@ -105,39 +110,43 @@ contract NexusSettler is
                 ++i;
             }
         }
-        // 3. execute all actions pertaining to this domain
-        for (; i < intent.actions.length;) {
-            Action memory action = intent.actions[i];
-            if (action.domain.equal(localDomain)) {
-                emit Executed(orderId, action.actionType, action);
-                for (uint256 j = 0; j < action.venue.length;) {
-                    Venue memory venue = action.venue[j];
-                    address target = venue.target.parseAddress();
-                    target.functionCallWithValue(venue.callData, venue.value);
-                    unchecked {
-                        ++j;
-                    }
-                }
-            }
+        // update filled status, before external calls
+        ordersFilled[orderId] = true;
+        // 2. execute batch conditions, locks, funds, actions in order
+        for (i = 0; i < batch.conditions.length;) {
+            Action memory action = batch.conditions[i];
+            address target = action.target.parseAddress();
+            target.functionCallWithValue(action.callData, action.value);
             unchecked {
                 ++i;
             }
         }
-        // 4. validate locks pertaining to this domain
-        for (i = 0; i < localLocks;) {
-            Resource memory resource = intent.locks[i];
-            if (resource.domain.equal(localDomain)) {
-                locks[localLocks] = resource;
-                IERC20 token = IERC20(address(bytes20(resource.token)));
-                address recipient = address(bytes20(resource.recipient));
-                uint256 oldAllowance = _allowances(owner, recipient, address(token));
-                require(token.allowance(owner, recipient) >= oldAllowance + resource.amount, InvalidLock());
-            }
+        for (i = 0; i < batch.locks.length;) {
+            Lock memory lock = batch.locks[i];
+            IERC20 token = IERC20(address(bytes20(lock.token)));
+            token.safeTransferFrom(owner, escrow, lock.amount);
             unchecked {
                 ++i;
             }
         }
-        // 5. validate outputs pertaining to this domain
+        for (i = 0; i < batch.funds.length;) {
+            Fund memory fund = batch.funds[i];
+            IERC20 token = IERC20(address(bytes20(fund.token)));
+            address recipient = address(bytes20(fund.recipient));
+            token.safeTransferFrom(msg.sender, recipient, fund.amount);
+            unchecked {
+                ++i;
+            }
+        }
+        for (i = 0; i < batch.actions.length;) {
+            Action memory action = batch.actions[i];
+            address target = action.target.parseAddress();
+            target.functionCallWithValue(action.callData, action.value);
+            unchecked {
+                ++i;
+            }
+        }
+        // 3. validate outputs pertaining to this domain
         for (i = 0; i < localOutputs;) {
             Resource memory resource = intent.outputs[i];
             if (resource.domain.equal(localDomain)) {
@@ -145,7 +154,7 @@ contract NexusSettler is
                 IERC20 token = IERC20(address(bytes20(resource.token)));
                 address recipient = address(bytes20(resource.recipient));
                 uint256 oldBalance = _balances(recipient, address(token));
-                require(token.balanceOf(recipient) >= oldBalance + resource.amount, InvalidLock());
+                require(token.balanceOf(recipient) >= oldBalance + resource.amount, InvalidOutput());
             }
             unchecked {
                 ++i;
@@ -196,12 +205,12 @@ contract NexusSettler is
         Intent memory intent = abi.decode(order.orderData, (Intent));
         require(intent.domain.equal(CAIP2.local()), InvalidDomain());
         require(intent.sender == bytes32(bytes20(msg.sender)), InvalidSender());
-        Output[] memory maxSpent = new Output[](intent.locks.length);
+        Output[] memory maxSpent = new Output[](intent.inputs.length);
         Output[] memory minReceived = new Output[](intent.outputs.length);
-        FillInstruction[] memory fillInstructions = new FillInstruction[](intent.actions.length);
+        FillInstruction[] memory fillInstructions = new FillInstruction[](intent.batch.length);
         uint256 i;
-        for (; i < intent.locks.length;) {
-            Resource memory resource = intent.locks[i];
+        for (; i < intent.inputs.length;) {
+            Resource memory resource = intent.inputs[i];
             (string memory namespace, string memory ref) = resource.domain.parse();
             require(namespace.equal("eip155"), InvalidDomain());
             maxSpent[i] = Output({
@@ -228,8 +237,8 @@ contract NexusSettler is
                 ++i;
             }
         }
-        for (i = 0; i < intent.actions.length;) {
-            Action memory action = intent.actions[i];
+        for (i = 0; i < intent.batch.length;) {
+            Actions memory action = intent.batch[i];
             (string memory namespace, string memory ref) = action.domain.parse();
             require(namespace.equal("eip155"), InvalidDomain());
             fillInstructions[i] = FillInstruction({
