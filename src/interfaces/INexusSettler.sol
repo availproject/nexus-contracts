@@ -50,7 +50,7 @@ interface INexusSettler {
         Fund[] funds;
         Action[] actions;
     }
-    
+
     struct Intent {
         string domain;
         Actions[] batch;

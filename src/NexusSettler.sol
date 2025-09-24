@@ -58,18 +58,22 @@ contract NexusSettler is
     }
 
     function openFor(XGaslessCrossChainOrder calldata order, bytes calldata signature, bytes calldata originFillerData)
-        external 
+        external
     {
         // Implementation goes here
     }
 
-    function open(OnchainCrossChainOrder calldata order) override external {
+    function open(OnchainCrossChainOrder calldata order) external override {
         ResolvedCrossChainOrder memory resolvedOrder = _resolve(order);
         emit Open(resolvedOrder.orderId, resolvedOrder);
         ordersSent[resolvedOrder.orderId] = true;
     }
 
-    function fill(bytes32 orderId, bytes calldata originData, bytes calldata) override(IDestinationSettler, IXDestinationSettler) external nonReentrant {
+    function fill(bytes32 orderId, bytes calldata originData, bytes calldata)
+        external
+        override(IDestinationSettler, IXDestinationSettler)
+        nonReentrant
+    {
         require(keccak256(originData) == orderId, InvalidOrderId());
         require(!ordersFilled[orderId], OrderFilled());
         OnchainCrossChainOrder memory order = abi.decode(originData, (OnchainCrossChainOrder));
@@ -190,11 +194,7 @@ contract NexusSettler is
         return _resolve(order);
     }
 
-    function xresolve(XOnchainCrossChainOrder calldata order)
-        external
-        view
-        returns (XResolvedCrossChainOrder memory)
-    {
+    function xresolve(XOnchainCrossChainOrder calldata order) external view returns (XResolvedCrossChainOrder memory) {
         // Implementation goes here
     }
 
