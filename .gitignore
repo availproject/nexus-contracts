@@ -17,3 +17,5 @@ states/
 cache/
 out/
 broadcast/
+
+.vscode

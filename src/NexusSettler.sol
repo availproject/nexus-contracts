@@ -76,8 +76,11 @@ contract NexusSettler is
     {
         require(keccak256(originData) == orderId, InvalidOrderId());
         require(!ordersFilled[orderId], OrderFilled());
-        OnchainCrossChainOrder memory order = abi.decode(originData, (OnchainCrossChainOrder));
-        Intent memory intent = abi.decode(order.orderData, (Intent));
+        // OnchainCrossChainOrder memory order = abi.decode(
+        //     originData,
+        //     (OnchainCrossChainOrder)
+        // );
+        Intent memory intent = abi.decode(originData, (Intent));
         string memory localDomain = CAIP2.local();
         Resource[] memory outputs = new Resource[](intent.outputs.length);
         address owner = address(bytes20(intent.sender));
