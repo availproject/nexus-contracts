@@ -89,10 +89,10 @@ contract NexusSettler is
         Actions memory batch;
         // extract batch for this domain
         bool flag = false;
-        for (; i < intent.batch.length;) {
-            Actions memory actions = intent.batch[i];
+        for (; i < intent.batches.length;) {
+            Actions memory actions = intent.batches[i];
             if (actions.domain.equal(localDomain)) {
-                batch = intent.batch[i];
+                batch = intent.batches[i];
                 flag = true;
                 break;
             }
@@ -210,7 +210,7 @@ contract NexusSettler is
         require(intent.sender == bytes32(bytes20(msg.sender)), InvalidSender());
         Output[] memory maxSpent = new Output[](intent.inputs.length);
         Output[] memory minReceived = new Output[](intent.outputs.length);
-        FillInstruction[] memory fillInstructions = new FillInstruction[](intent.batch.length);
+        FillInstruction[] memory fillInstructions = new FillInstruction[](intent.batches.length);
         uint256 i;
         for (; i < intent.inputs.length;) {
             Resource memory resource = intent.inputs[i];
@@ -240,8 +240,8 @@ contract NexusSettler is
                 ++i;
             }
         }
-        for (i = 0; i < intent.batch.length;) {
-            Actions memory action = intent.batch[i];
+        for (i = 0; i < intent.batches.length;) {
+            Actions memory action = intent.batches[i];
             (string memory namespace, string memory ref) = action.domain.parse();
             require(namespace.equal("eip155"), InvalidDomain());
             fillInstructions[i] = FillInstruction({

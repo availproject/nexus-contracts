@@ -53,7 +53,7 @@ interface INexusSettler {
 
     struct Intent {
         string domain;
-        Actions[] batch;
+        Actions[] batches;
         bytes32 sender;
         bytes32 recipient;
         uint256 nonce;
