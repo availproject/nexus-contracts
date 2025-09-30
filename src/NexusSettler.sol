@@ -69,7 +69,7 @@ contract NexusSettler is
     }
 
     function fill(bytes32 orderId, bytes calldata originData, bytes calldata fillerData) external {
-        require(keccak256(originData) == orderId, InvalidOrderId());
+        require(keccak256(abi.encodePacked(originData)) == orderId, InvalidOrderId());
         require(!ordersFilled[orderId], OrderFilled());
         // OnchainCrossChainOrder memory order = abi.decode(
         //     originData,
