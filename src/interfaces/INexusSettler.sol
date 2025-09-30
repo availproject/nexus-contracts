@@ -12,7 +12,8 @@ interface INexusSettler {
     }
 
     struct Lock {
-        bytes32 source;
+        //Commented for now as only intent signer can be the source address.
+        //bytes32 source;
         bytes32 token;
         uint256 amount;
     }

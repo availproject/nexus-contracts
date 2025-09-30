@@ -26,7 +26,6 @@ contract NexusSettler is
     IOriginSettler,
     IXOriginSettler,
     IDestinationSettler,
-    IXDestinationSettler,
     INexusSettler
 {
     using Address for address;
@@ -69,11 +68,7 @@ contract NexusSettler is
         ordersSent[resolvedOrder.orderId] = true;
     }
 
-    function fill(bytes32 orderId, bytes calldata originData, bytes calldata)
-        external
-        override(IDestinationSettler, IXDestinationSettler)
-        nonReentrant
-    {
+    function fill(bytes32 orderId, bytes calldata originData, bytes calldata fillerData) external {
         require(keccak256(originData) == orderId, InvalidOrderId());
         require(!ordersFilled[orderId], OrderFilled());
         // OnchainCrossChainOrder memory order = abi.decode(
