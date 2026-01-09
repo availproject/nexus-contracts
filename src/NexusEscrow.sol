@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-pragma solidity 0.8.30;
+pragma solidity 0.8.26;
 
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -13,7 +13,7 @@ contract NexusEscrow is INexusEscrow {
     // TODO: access control
     function settle(Settlement[] calldata settlements) external {
         uint256 i;
-        for (i = 0; i < settlements.length;) {
+        for (i = 0; i < settlements.length; ) {
             Settlement memory settlement = settlements[i];
             IERC20 token = IERC20(address(bytes20(settlement.token)));
             address recipient = address(bytes20(settlement.recipient));

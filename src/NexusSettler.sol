@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-pragma solidity 0.8.30;
+pragma solidity 0.8.26;
 
 import {EIP712} from "lib/openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
 import {Address} from "lib/openzeppelin-contracts/contracts/utils/Address.sol";
@@ -17,6 +17,8 @@ import {IERC7683} from "./interfaces/IERC7683.sol";
 import {IOriginSettler} from "./interfaces/IOriginSettler.sol";
 import {IDestinationSettler} from "./interfaces/IDestinationSettler.sol";
 import {INexusSettler} from "./interfaces/INexusSettler.sol";
+import {IActionRouter} from "./interfaces/IActionRouter.sol";
+import {console2} from "lib/forge-std/src/console2.sol";
 
 contract NexusSettler is
     ReentrancyGuardTransient,
@@ -36,10 +38,14 @@ contract NexusSettler is
     using TransientSlot for *;
 
     bytes32 private constant INTENT_TYPEHASH =
-        keccak256("Intent(string domain,Actions[] batch,bytes32 sender,bytes32 recipient,uint256 nonce)");
+        keccak256(
+            "Intent(string domain,Actions[] batch,bytes32 sender,bytes32 recipient,uint256 nonce)"
+        );
     // transient mappings
-    bytes32 private constant _ALLOWANCES_NAMESPACE = keccak256(abi.encodePacked("nexus-settler/allowances"));
-    bytes32 private constant _BALANCES_NAMESPACE = keccak256(abi.encodePacked("nexus-settler/balances"));
+    bytes32 private constant _ALLOWANCES_NAMESPACE =
+        keccak256(abi.encodePacked("nexus-settler/allowances"));
+    bytes32 private constant _BALANCES_NAMESPACE =
+        keccak256(abi.encodePacked("nexus-settler/balances"));
 
     address public immutable escrow;
 
@@ -50,15 +56,19 @@ contract NexusSettler is
         escrow = newEscrow;
     }
 
-    function openFor(GaslessCrossChainOrder calldata order, bytes calldata signature, bytes calldata originFillerData)
-        external
-    {
+    function openFor(
+        GaslessCrossChainOrder calldata order,
+        bytes calldata signature,
+        bytes calldata originFillerData
+    ) external {
         // Implementation goes here
     }
 
-    function openFor(XGaslessCrossChainOrder calldata order, bytes calldata signature, bytes calldata originFillerData)
-        external
-    {
+    function openFor(
+        XGaslessCrossChainOrder calldata order,
+        bytes calldata signature,
+        bytes calldata originFillerData
+    ) external {
         // Implementation goes here
     }
 
@@ -68,8 +78,13 @@ contract NexusSettler is
         ordersSent[resolvedOrder.orderId] = true;
     }
 
-    function fill(bytes32 orderId, bytes calldata originData, bytes calldata fillerData) external {
-        require(keccak256(abi.encodePacked(originData)) == orderId, InvalidOrderId());
+    function fill(
+        bytes32 orderId,
+        bytes calldata originData,
+        bytes calldata _fillerData
+    ) external {
+        console2.logBytes32(keccak256(originData));
+        require(keccak256(originData) == orderId, InvalidOrderId());
         require(!ordersFilled[orderId], OrderFilled());
         // OnchainCrossChainOrder memory order = abi.decode(
         //     originData,
@@ -84,7 +99,7 @@ contract NexusSettler is
         Actions memory batch;
         // extract batch for this domain
         bool flag = false;
-        for (; i < intent.batches.length;) {
+        for (; i < intent.batches.length; ) {
             Actions memory actions = intent.batches[i];
             if (actions.domain.equal(localDomain)) {
                 batch = intent.batches[i];
@@ -98,12 +113,16 @@ contract NexusSettler is
         // no valid batch found
         require(flag, InvalidDomain());
         // 1. check outputs pertaining to this domain
-        for (i = 0; i < intent.outputs.length;) {
+        for (i = 0; i < intent.outputs.length; ) {
             Resource memory resource = intent.outputs[i];
             if (resource.domain.equal(localDomain)) {
                 outputs[localOutputs] = resource;
                 IERC20 token = IERC20(address(bytes20(resource.token)));
-                _setBalance(owner, address(token), token.balanceOf(address(bytes20(resource.recipient))));
+                _setBalance(
+                    owner,
+                    address(token),
+                    token.balanceOf(address(bytes20(resource.recipient)))
+                );
                 unchecked {
                     ++localOutputs;
                 }
@@ -115,7 +134,7 @@ contract NexusSettler is
         // update filled status, before external calls
         ordersFilled[orderId] = true;
         // 2. execute batch conditions, locks, funds, actions in order
-        for (i = 0; i < batch.conditions.length;) {
+        for (i = 0; i < batch.conditions.length; ) {
             Action memory action = batch.conditions[i];
             address target = action.target.parseAddress();
             target.functionCallWithValue(action.callData, action.value);
@@ -123,7 +142,7 @@ contract NexusSettler is
                 ++i;
             }
         }
-        for (i = 0; i < batch.locks.length;) {
+        for (i = 0; i < batch.locks.length; ) {
             Lock memory lock = batch.locks[i];
             IERC20 token = IERC20(address(bytes20(lock.token)));
             token.safeTransferFrom(owner, escrow, lock.amount);
@@ -131,33 +150,47 @@ contract NexusSettler is
                 ++i;
             }
         }
-        for (i = 0; i < batch.funds.length;) {
+        for (i = 0; i < batch.funds.length; ) {
             Fund memory fund = batch.funds[i];
             IERC20 token = IERC20(address(bytes20(fund.token)));
             address recipient = address(bytes20(fund.recipient));
+
             token.safeTransferFrom(msg.sender, recipient, fund.amount);
             unchecked {
                 ++i;
             }
         }
-        for (i = 0; i < batch.actions.length;) {
+
+        bytes memory previousData = "";
+
+        for (i = 0; i < batch.actions.length; ) {
             Action memory action = batch.actions[i];
             address target = action.target.parseAddress();
-            target.functionCallWithValue(action.callData, action.value);
+
+            if (action.actionType == INexusSettler.ActionType.SWAP) {
+                previousData = IActionRouter(target).execute(
+                    action,
+                    previousData
+                );
+            } else {
+                target.functionCallWithValue(action.callData, action.value);
+            }
             unchecked {
                 ++i;
             }
         }
         // 3. validate outputs pertaining to this domain
-        for (i = 0; i < localOutputs;) {
-            Resource memory resource = intent.outputs[i];
-            if (resource.domain.equal(localDomain)) {
-                outputs[localOutputs] = resource;
-                IERC20 token = IERC20(address(bytes20(resource.token)));
-                address recipient = address(bytes20(resource.recipient));
-                uint256 oldBalance = _balances(recipient, address(token));
-                require(token.balanceOf(recipient) >= oldBalance + resource.amount, InvalidOutput());
-            }
+        for (i = 0; i < localOutputs; ) {
+            Resource memory resource = outputs[i];
+
+            IERC20 token = IERC20(address(bytes20(resource.token)));
+            address recipient = address(bytes20(resource.recipient));
+            uint256 oldBalance = _balances(recipient, address(token));
+            require(
+                token.balanceOf(recipient) >= oldBalance + resource.amount,
+                InvalidOutput()
+            );
+
             unchecked {
                 ++i;
             }
@@ -165,38 +198,35 @@ contract NexusSettler is
         emit Filled(orderId);
     }
 
-    function resolveFor(GaslessCrossChainOrder calldata order, bytes calldata originFillerData)
-        external
-        view
-        override
-        returns (ResolvedCrossChainOrder memory)
-    {
+    function resolveFor(
+        GaslessCrossChainOrder calldata order,
+        bytes calldata originFillerData
+    ) external view override returns (ResolvedCrossChainOrder memory) {
         // Implementation goes here
     }
 
-    function resolveFor(XGaslessCrossChainOrder calldata order, bytes calldata originFillerData)
-        external
-        view
-        override
-        returns (XResolvedCrossChainOrder memory)
-    {
+    function resolveFor(
+        XGaslessCrossChainOrder calldata order,
+        bytes calldata originFillerData
+    ) external view override returns (XResolvedCrossChainOrder memory) {
         // Implementation goes here
     }
 
-    function resolve(OnchainCrossChainOrder calldata order)
-        external
-        view
-        override
-        returns (ResolvedCrossChainOrder memory)
-    {
+    function resolve(
+        OnchainCrossChainOrder calldata order
+    ) external view override returns (ResolvedCrossChainOrder memory) {
         return _resolve(order);
     }
 
-    function xresolve(XOnchainCrossChainOrder calldata order) external view returns (XResolvedCrossChainOrder memory) {
+    function xresolve(
+        XOnchainCrossChainOrder calldata order
+    ) external view returns (XResolvedCrossChainOrder memory) {
         // Implementation goes here
     }
 
-    function _resolve(OnchainCrossChainOrder calldata order) private view returns (ResolvedCrossChainOrder memory) {
+    function _resolve(
+        OnchainCrossChainOrder calldata order
+    ) private view returns (ResolvedCrossChainOrder memory) {
         bytes32 orderId = keccak256(abi.encode(order));
         require(!ordersSent[orderId], OrderSent());
         require(order.orderDataType == INTENT_TYPEHASH, InvalidOrderDataType());
@@ -205,11 +235,15 @@ contract NexusSettler is
         require(intent.sender == bytes32(bytes20(msg.sender)), InvalidSender());
         Output[] memory maxSpent = new Output[](intent.inputs.length);
         Output[] memory minReceived = new Output[](intent.outputs.length);
-        FillInstruction[] memory fillInstructions = new FillInstruction[](intent.batches.length);
+        FillInstruction[] memory fillInstructions = new FillInstruction[](
+            intent.batches.length
+        );
         uint256 i;
-        for (; i < intent.inputs.length;) {
+        for (; i < intent.inputs.length; ) {
             Resource memory resource = intent.inputs[i];
-            (string memory namespace, string memory ref) = resource.domain.parse();
+            (string memory namespace, string memory ref) = resource
+                .domain
+                .parse();
             require(namespace.equal("eip155"), InvalidDomain());
             maxSpent[i] = Output({
                 token: resource.token,
@@ -221,9 +255,11 @@ contract NexusSettler is
                 ++i;
             }
         }
-        for (i = 0; i < intent.outputs.length;) {
+        for (i = 0; i < intent.outputs.length; ) {
             Resource memory resource = intent.outputs[i];
-            (string memory namespace, string memory ref) = resource.domain.parse();
+            (string memory namespace, string memory ref) = resource
+                .domain
+                .parse();
             require(namespace.equal("eip155"), InvalidDomain());
             maxSpent[i] = Output({
                 token: resource.token,
@@ -235,9 +271,11 @@ contract NexusSettler is
                 ++i;
             }
         }
-        for (i = 0; i < intent.batches.length;) {
+        for (i = 0; i < intent.batches.length; ) {
             Actions memory action = intent.batches[i];
-            (string memory namespace, string memory ref) = action.domain.parse();
+            (string memory namespace, string memory ref) = action
+                .domain
+                .parse();
             require(namespace.equal("eip155"), InvalidDomain());
             fillInstructions[i] = FillInstruction({
                 destinationChainId: ref.parseUint(),
@@ -248,35 +286,69 @@ contract NexusSettler is
                 ++i;
             }
         }
-        return ResolvedCrossChainOrder({
-            user: msg.sender,
-            originChainId: block.chainid,
-            openDeadline: uint32(block.timestamp),
-            fillDeadline: order.fillDeadline,
-            orderId: orderId,
-            maxSpent: maxSpent,
-            minReceived: minReceived,
-            fillInstructions: fillInstructions
-        });
-    }
-
-    function _setAllowance(address owner, address spender, address token, uint256 amount) private {
-        _ALLOWANCES_NAMESPACE.deriveMapping(owner).deriveMapping(spender).deriveMapping(token).asUint256().tstore(
-            amount
-        );
-    }
-
-    function _setBalance(address recipient, address token, uint256 amount) private {
-        _BALANCES_NAMESPACE.deriveMapping(recipient).deriveMapping(token).asUint256().tstore(amount);
-    }
-
-    function _allowances(address owner, address spender, address token) private view returns (uint256) {
         return
-            _ALLOWANCES_NAMESPACE.deriveMapping(owner).deriveMapping(spender).deriveMapping(token).asUint256().tload();
+            ResolvedCrossChainOrder({
+                user: msg.sender,
+                originChainId: block.chainid,
+                openDeadline: uint32(block.timestamp),
+                fillDeadline: order.fillDeadline,
+                orderId: orderId,
+                maxSpent: maxSpent,
+                minReceived: minReceived,
+                fillInstructions: fillInstructions
+            });
     }
 
-    function _balances(address recipient, address token) private view returns (uint256) {
-        return _BALANCES_NAMESPACE.deriveMapping(recipient).deriveMapping(token).asUint256().tload();
+    function _setAllowance(
+        address owner,
+        address spender,
+        address token,
+        uint256 amount
+    ) private {
+        _ALLOWANCES_NAMESPACE
+            .deriveMapping(owner)
+            .deriveMapping(spender)
+            .deriveMapping(token)
+            .asUint256()
+            .tstore(amount);
+    }
+
+    function _setBalance(
+        address recipient,
+        address token,
+        uint256 amount
+    ) private {
+        _BALANCES_NAMESPACE
+            .deriveMapping(recipient)
+            .deriveMapping(token)
+            .asUint256()
+            .tstore(amount);
+    }
+
+    function _allowances(
+        address owner,
+        address spender,
+        address token
+    ) private view returns (uint256) {
+        return
+            _ALLOWANCES_NAMESPACE
+                .deriveMapping(owner)
+                .deriveMapping(spender)
+                .deriveMapping(token)
+                .asUint256()
+                .tload();
+    }
+
+    function _balances(
+        address recipient,
+        address token
+    ) private view returns (uint256) {
+        return
+            _BALANCES_NAMESPACE
+                .deriveMapping(recipient)
+                .deriveMapping(token)
+                .asUint256()
+                .tload();
     }
 }
 

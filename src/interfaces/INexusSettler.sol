@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-pragma solidity 0.8.30;
+pragma solidity 0.8.26;
 
 interface INexusSettler {
     enum ActionType {
@@ -14,6 +14,11 @@ interface INexusSettler {
     struct Lock {
         //Commented for now as only intent signer can be the source address.
         //bytes32 source;
+        bytes32 token;
+        uint256 amount;
+    }
+
+    struct Fees {
         bytes32 token;
         uint256 amount;
     }
@@ -50,6 +55,7 @@ interface INexusSettler {
         Lock[] locks;
         Fund[] funds;
         Action[] actions;
+        Fees fees;
     }
 
     struct Intent {
@@ -71,6 +77,14 @@ interface INexusSettler {
     error OrderSent();
     error OrderFilled();
 
-    event Executed(bytes32 indexed orderId, ActionType indexed actionType, Action action);
+    event Executed(
+        bytes32 indexed orderId,
+        ActionType indexed actionType,
+        Action action
+    );
     event Filled(bytes32 indexed orderId);
 }
+
+// -> Fund 10 USDC to NexusSettler = +10 USDC
+// -> Whitelisted IActionsroutes who already have allowance.abi || PERMIT as a precondition to IActionrouter address || Interact with PERMIT2 to permit IActionrouter address
+// -> IActionrouter.execute() = -10 USDC + 10 USDT
