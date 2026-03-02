@@ -1,0 +1,504 @@
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity 0.8.26;
+
+import "lib/forge-std/src/Test.sol";
+import "lib/forge-std/src/console2.sol";
+import "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
+import "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
+import "../src/NexusSettler.sol";
+import "../src/interfaces/INexusSettler.sol";
+
+// Mock ERC20 token for testing
+contract MockERC20 is ERC20 {
+    constructor(string memory name, string memory symbol) ERC20(name, symbol) {}
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+}
+
+// Mock AToken for Aave deposit testing - minter restricted to MockAavePool
+contract MockAToken is ERC20 {
+    address public minter;
+
+    constructor(string memory name, string memory symbol) ERC20(name, symbol) {
+        minter = msg.sender; // Deployer is minter
+    }
+
+    function mint(address to, uint256 amount) external {
+        require(msg.sender == minter, "Only minter");
+        _mint(to, amount);
+    }
+
+    function setMinter(address _minter) external {
+        require(msg.sender == minter, "Only minter");
+        minter = _minter;
+    }
+}
+
+// DirectFill: performs the same token operations as NexusSettler.fill()
+// but without the settler contract abstraction/overhead
+contract DirectFill {
+    using SafeERC20 for IERC20;
+
+    address public escrow;
+
+    constructor(address _escrow) {
+        escrow = _escrow;
+    }
+
+    // Direct fill operation - same logic as NexusSettler.fill() but without:
+    // - orderId validation
+    // - ordersFilled mapping check/update
+    // - domain parsing and validation
+    // - balance tracking for outputs
+    // - intent decoding overhead
+    function directFill(
+        address owner,
+        DirectFillData calldata data
+    ) external {
+        // Execute conditions (external calls)
+        for (uint256 i = 0; i < data.conditions.length; ) {
+            DirectAction memory action = data.conditions[i];
+            (bool success, ) = action.target.call{value: action.value}(action.callData);
+            require(success, "Condition failed");
+            unchecked {
+                ++i;
+            }
+        }
+
+        // Execute locks (transfer to escrow)
+        for (uint256 i = 0; i < data.locks.length; ) {
+            DirectLock memory lock = data.locks[i];
+            IERC20(lock.token).safeTransferFrom(owner, escrow, lock.amount);
+            unchecked {
+                ++i;
+            }
+        }
+
+        // Execute funds (transfer from filler to recipients)
+        for (uint256 i = 0; i < data.funds.length; ) {
+            DirectFund memory fund = data.funds[i];
+            IERC20(fund.token).safeTransferFrom(msg.sender, fund.recipient, fund.amount);
+            unchecked {
+                ++i;
+            }
+        }
+
+        // Execute actions (arbitrary calls)
+        for (uint256 i = 0; i < data.actions.length; ) {
+            DirectAction memory action = data.actions[i];
+            (bool success, ) = action.target.call{value: action.value}(action.callData);
+            require(success, "Action failed");
+            unchecked {
+                ++i;
+            }
+        }
+    }
+}
+
+// Data structures for DirectFill
+struct DirectAction {
+    address target;
+    bytes callData;
+    uint256 value;
+}
+
+struct DirectLock {
+    address token;
+    uint256 amount;
+}
+
+struct DirectFund {
+    address token;
+    address recipient;
+    uint256 amount;
+}
+
+struct DirectFillData {
+    DirectAction[] conditions;
+    DirectLock[] locks;
+    DirectFund[] funds;
+    DirectAction[] actions;
+}
+
+contract GasProfilerTest is Test {
+    NexusSettler public nexusSettler;
+    DirectFill public directFill;
+    address public escrow;
+    
+    MockERC20 public tokenA;
+    MockERC20 public tokenB;
+    MockERC20 public tokenC;
+    
+    address public owner;
+    address public filler;
+    address public recipient1;
+    address public recipient2;
+    
+    // Test data
+    bytes32 constant ORDER_ID = keccak256("test_order");
+    uint256 constant INITIAL_BALANCE = 1000000e18;
+    uint256 constant LOCK_AMOUNT = 100e18;
+    uint256 constant FUND_AMOUNT = 50e18;
+
+    function setUp() public {
+        // Setup addresses
+        escrow = makeAddr("escrow");
+        owner = makeAddr("owner");
+        filler = makeAddr("filler");
+        recipient1 = makeAddr("recipient1");
+        recipient2 = makeAddr("recipient2");
+        
+        // Deploy contracts
+        nexusSettler = new NexusSettler(escrow);
+        directFill = new DirectFill(escrow);
+        
+        // Deploy tokens
+        tokenA = new MockERC20("Token A", "TKA");
+        tokenB = new MockERC20("Token B", "TKB");
+        tokenC = new MockERC20("Token C", "TKC");
+        
+        // Mint tokens to owner and filler
+        tokenA.mint(owner, INITIAL_BALANCE);
+        tokenA.mint(filler, INITIAL_BALANCE);
+        tokenB.mint(owner, INITIAL_BALANCE);
+        tokenB.mint(filler, INITIAL_BALANCE);
+        tokenC.mint(owner, INITIAL_BALANCE);
+        tokenC.mint(filler, INITIAL_BALANCE);
+        
+        // Approve tokens for NexusSettler and DirectFill
+        vm.startPrank(owner);
+        tokenA.approve(address(nexusSettler), type(uint256).max);
+        tokenA.approve(address(directFill), type(uint256).max);
+        tokenB.approve(address(nexusSettler), type(uint256).max);
+        tokenB.approve(address(directFill), type(uint256).max);
+        tokenC.approve(address(nexusSettler), type(uint256).max);
+        tokenC.approve(address(directFill), type(uint256).max);
+        vm.stopPrank();
+        
+        vm.startPrank(filler);
+        tokenA.approve(address(nexusSettler), type(uint256).max);
+        tokenA.approve(address(directFill), type(uint256).max);
+        tokenB.approve(address(nexusSettler), type(uint256).max);
+        tokenB.approve(address(directFill), type(uint256).max);
+        tokenC.approve(address(nexusSettler), type(uint256).max);
+        tokenC.approve(address(directFill), type(uint256).max);
+        vm.stopPrank();
+    }
+
+    // ============ Helper Functions ============
+
+    function createTestIntent() internal view returns (INexusSettler.Intent memory) {
+        // Create a batch for the local domain
+        INexusSettler.Action[] memory conditions = new INexusSettler.Action[](0);
+        
+        INexusSettler.Lock[] memory locks = new INexusSettler.Lock[](1);
+        locks[0] = INexusSettler.Lock({
+            token: bytes32(bytes20(address(tokenA))),
+            amount: LOCK_AMOUNT
+        });
+        
+        INexusSettler.Fund[] memory funds = new INexusSettler.Fund[](1);
+        funds[0] = INexusSettler.Fund({
+            recipient: bytes32(bytes20(recipient1)),
+            token: bytes32(bytes20(address(tokenB))),
+            amount: FUND_AMOUNT
+        });
+        
+        INexusSettler.Action[] memory actions = new INexusSettler.Action[](0);
+        
+        INexusSettler.Actions memory batch = INexusSettler.Actions({
+            domain: string.concat("eip155:", Strings.toString(block.chainid)),
+            settler: bytes32(bytes20(address(nexusSettler))),
+            conditions: conditions,
+            locks: locks,
+            funds: funds,
+            actions: actions,
+            fees: INexusSettler.Fees(bytes32(0), 0)
+        });
+        
+        INexusSettler.Actions[] memory batches = new INexusSettler.Actions[](1);
+        batches[0] = batch;
+        
+        // Create outputs for validation
+        INexusSettler.Resource[] memory inputs = new INexusSettler.Resource[](0);
+        INexusSettler.Resource[] memory outputs = new INexusSettler.Resource[](0);
+        
+        return INexusSettler.Intent({
+            domain: string.concat("eip155:", Strings.toString(block.chainid)),
+            batches: batches,
+            sender: bytes32(bytes20(owner)),
+            recipient: bytes32(bytes20(recipient1)),
+            nonce: 1,
+            inputs: inputs,
+            outputs: outputs
+        });
+    }
+
+    function createDirectFillData() internal view returns (DirectFillData memory) {
+        DirectAction[] memory conditions = new DirectAction[](0);
+        
+        DirectLock[] memory locks = new DirectLock[](1);
+        locks[0] = DirectLock({
+            token: address(tokenA),
+            amount: LOCK_AMOUNT
+        });
+        
+        DirectFund[] memory funds = new DirectFund[](1);
+        funds[0] = DirectFund({
+            token: address(tokenB),
+            recipient: recipient1,
+            amount: FUND_AMOUNT
+        });
+        
+        DirectAction[] memory actions = new DirectAction[](0);
+        
+        return DirectFillData({
+            conditions: conditions,
+            locks: locks,
+            funds: funds,
+            actions: actions
+        });
+    }
+
+    // ============ Gas Profiling Tests ============
+
+    function testGasProfile_NexusSettlerFill_Simple() public {
+        // Setup: Create intent and order
+        INexusSettler.Intent memory intent = createTestIntent();
+        bytes memory originData = abi.encode(intent);
+        bytes32 orderId = keccak256(originData);
+        
+        // First open the order
+        IERC7683.OnchainCrossChainOrder memory order = IERC7683.OnchainCrossChainOrder({
+            fillDeadline: uint32(block.timestamp + 1 hours),
+            orderDataType: keccak256("Intent(string domain,Actions[] batch,bytes32 sender,bytes32 recipient,uint256 nonce)"),
+            orderData: originData
+        });
+        
+        vm.prank(owner);
+        nexusSettler.open(order);
+        
+        // Profile gas for fill operation
+        vm.prank(filler);
+        uint256 gasStart = gasleft();
+        nexusSettler.fill(orderId, originData, "");
+        uint256 gasUsed = gasStart - gasleft();
+        
+        console2.log("=== NexusSettler.fill() Gas Profile (Simple) ===");
+        console2.log("Gas used:", gasUsed);
+    }
+
+    function testGasProfile_DirectFill_Simple() public {
+        // Setup: Create direct fill data
+        DirectFillData memory data = createDirectFillData();
+        
+        // Profile gas for direct fill operation
+        vm.prank(filler);
+        uint256 gasStart = gasleft();
+        directFill.directFill(owner, data);
+        uint256 gasUsed = gasStart - gasleft();
+        
+        console2.log("=== DirectFill.directFill() Gas Profile (Simple) ===");
+        console2.log("Gas used:", gasUsed);
+    }
+
+    function testGasProfile_Comparison_Simple() public {
+        // Setup: Create intent and order for NexusSettler
+        INexusSettler.Intent memory intent = createTestIntent();
+        bytes memory originData = abi.encode(intent);
+        bytes32 orderId = keccak256(originData);
+        
+        IERC7683.OnchainCrossChainOrder memory order = IERC7683.OnchainCrossChainOrder({
+            fillDeadline: uint32(block.timestamp + 1 hours),
+            orderDataType: keccak256("Intent(string domain,Actions[] batch,bytes32 sender,bytes32 recipient,uint256 nonce)"),
+            orderData: originData
+        });
+        
+        // Reset state for fair comparison - use fresh filler for each
+        address filler1 = makeAddr("filler1");
+        tokenA.mint(filler1, INITIAL_BALANCE);
+        tokenB.mint(filler1, INITIAL_BALANCE);
+        vm.startPrank(filler1);
+        tokenA.approve(address(nexusSettler), type(uint256).max);
+        tokenB.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+        
+        vm.prank(owner);
+        nexusSettler.open(order);
+        
+        vm.prank(filler1);
+        uint256 gasNexus = gasleft();
+        nexusSettler.fill(orderId, originData, "");
+        gasNexus = gasNexus - gasleft();
+        
+        // Reset state for DirectFill
+        address filler2 = makeAddr("filler2");
+        tokenA.mint(filler2, INITIAL_BALANCE);
+        tokenB.mint(filler2, INITIAL_BALANCE);
+        vm.startPrank(filler2);
+        tokenA.approve(address(directFill), type(uint256).max);
+        tokenB.approve(address(directFill), type(uint256).max);
+        vm.stopPrank();
+        
+        DirectFillData memory data = createDirectFillData();
+        
+        vm.prank(filler2);
+        uint256 gasDirect = gasleft();
+        directFill.directFill(owner, data);
+        gasDirect = gasDirect - gasleft();
+        
+        // Report comparison
+        console2.log("\n=== Gas Comparison (Simple - 1 lock, 1 fund) ===");
+        console2.log("NexusSettler.fill() gas used:", gasNexus);
+        console2.log("DirectFill.directFill() gas used:", gasDirect);
+        console2.log("Difference (Nexus overhead):", gasNexus - gasDirect);
+        console2.log("Overhead percentage:", ((gasNexus - gasDirect) * 100) / gasDirect, "%");
+    }
+
+    // ============ Complex Scenarios ============
+
+    function testGasProfile_Comparison_Complex() public {
+        // Setup: Create complex intent with multiple locks, funds, and actions
+        INexusSettler.Action[] memory conditions = new INexusSettler.Action[](0);
+        
+        INexusSettler.Lock[] memory locks = new INexusSettler.Lock[](3);
+        locks[0] = INexusSettler.Lock({token: bytes32(bytes20(address(tokenA))), amount: LOCK_AMOUNT});
+        locks[1] = INexusSettler.Lock({token: bytes32(bytes20(address(tokenB))), amount: LOCK_AMOUNT});
+        locks[2] = INexusSettler.Lock({token: bytes32(bytes20(address(tokenC))), amount: LOCK_AMOUNT});
+        
+        INexusSettler.Fund[] memory funds = new INexusSettler.Fund[](2);
+        funds[0] = INexusSettler.Fund({
+            recipient: bytes32(bytes20(recipient1)),
+            token: bytes32(bytes20(address(tokenA))),
+            amount: FUND_AMOUNT
+        });
+        funds[1] = INexusSettler.Fund({
+            recipient: bytes32(bytes20(recipient2)),
+            token: bytes32(bytes20(address(tokenB))),
+            amount: FUND_AMOUNT
+        });
+        
+        INexusSettler.Action[] memory actions = new INexusSettler.Action[](0);
+        
+        INexusSettler.Actions memory batch = INexusSettler.Actions({
+            domain: string.concat("eip155:", Strings.toString(block.chainid)),
+            settler: bytes32(bytes20(address(nexusSettler))),
+            conditions: conditions,
+            locks: locks,
+            funds: funds,
+            actions: actions,
+            fees: INexusSettler.Fees(bytes32(0), 0)
+        });
+        
+        INexusSettler.Actions[] memory batches = new INexusSettler.Actions[](1);
+        batches[0] = batch;
+        
+        INexusSettler.Resource[] memory inputs = new INexusSettler.Resource[](0);
+        INexusSettler.Resource[] memory outputs = new INexusSettler.Resource[](0);
+        
+        INexusSettler.Intent memory intent = INexusSettler.Intent({
+            domain: string.concat("eip155:", Strings.toString(block.chainid)),
+            batches: batches,
+            sender: bytes32(bytes20(owner)),
+            recipient: bytes32(bytes20(recipient1)),
+            nonce: 1,
+            inputs: inputs,
+            outputs: outputs
+        });
+        
+        bytes memory originData = abi.encode(intent);
+        bytes32 orderId = keccak256(originData);
+        
+        IERC7683.OnchainCrossChainOrder memory order = IERC7683.OnchainCrossChainOrder({
+            fillDeadline: uint32(block.timestamp + 1 hours),
+            orderDataType: keccak256("Intent(string domain,Actions[] batch,bytes32 sender,bytes32 recipient,uint256 nonce)"),
+            orderData: originData
+        });
+        
+        // Test NexusSettler
+        address filler1 = makeAddr("filler1_complex");
+        tokenA.mint(filler1, INITIAL_BALANCE);
+        tokenB.mint(filler1, INITIAL_BALANCE);
+        vm.startPrank(filler1);
+        tokenA.approve(address(nexusSettler), type(uint256).max);
+        tokenB.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+        
+        vm.prank(owner);
+        nexusSettler.open(order);
+        
+        vm.prank(filler1);
+        uint256 gasNexus = gasleft();
+        nexusSettler.fill(orderId, originData, "");
+        gasNexus = gasNexus - gasleft();
+        
+        // Test DirectFill
+        address filler2 = makeAddr("filler2_complex");
+        tokenA.mint(filler2, INITIAL_BALANCE);
+        tokenB.mint(filler2, INITIAL_BALANCE);
+        tokenC.mint(filler2, INITIAL_BALANCE);
+        vm.startPrank(filler2);
+        tokenA.approve(address(directFill), type(uint256).max);
+        tokenB.approve(address(directFill), type(uint256).max);
+        tokenC.approve(address(directFill), type(uint256).max);
+        vm.stopPrank();
+        
+        DirectLock[] memory dLocks = new DirectLock[](3);
+        dLocks[0] = DirectLock({token: address(tokenA), amount: LOCK_AMOUNT});
+        dLocks[1] = DirectLock({token: address(tokenB), amount: LOCK_AMOUNT});
+        dLocks[2] = DirectLock({token: address(tokenC), amount: LOCK_AMOUNT});
+        
+        DirectFund[] memory dFunds = new DirectFund[](2);
+        dFunds[0] = DirectFund({token: address(tokenA), recipient: recipient1, amount: FUND_AMOUNT});
+        dFunds[1] = DirectFund({token: address(tokenB), recipient: recipient2, amount: FUND_AMOUNT});
+        
+        DirectFillData memory data = DirectFillData({
+            conditions: new DirectAction[](0),
+            locks: dLocks,
+            funds: dFunds,
+            actions: new DirectAction[](0)
+        });
+        
+        vm.prank(filler2);
+        uint256 gasDirect = gasleft();
+        directFill.directFill(owner, data);
+        gasDirect = gasDirect - gasleft();
+        
+        // Report comparison
+        console2.log("\n=== Gas Comparison (Complex - 3 locks, 2 funds) ===");
+        console2.log("NexusSettler.fill() gas used:", gasNexus);
+        console2.log("DirectFill.directFill() gas used:", gasDirect);
+        console2.log("Difference (Nexus overhead):", gasNexus - gasDirect);
+        console2.log("Overhead percentage:", ((gasNexus - gasDirect) * 100) / gasDirect, "%");
+    }
+
+    // ============ Foundry Gas Snapshots ============
+
+    function testGasSnapshot_NexusSettlerFill() public {
+        INexusSettler.Intent memory intent = createTestIntent();
+        bytes memory originData = abi.encode(intent);
+        bytes32 orderId = keccak256(originData);
+        
+        IERC7683.OnchainCrossChainOrder memory order = IERC7683.OnchainCrossChainOrder({
+            fillDeadline: uint32(block.timestamp + 1 hours),
+            orderDataType: keccak256("Intent(string domain,Actions[] batch,bytes32 sender,bytes32 recipient,uint256 nonce)"),
+            orderData: originData
+        });
+        
+        vm.prank(owner);
+        nexusSettler.open(order);
+        
+        vm.prank(filler);
+        nexusSettler.fill(orderId, originData, "");
+    }
+
+    function testGasSnapshot_DirectFill() public {
+        DirectFillData memory data = createDirectFillData();
+        
+        vm.prank(filler);
+        directFill.directFill(owner, data);
+    }
+}
