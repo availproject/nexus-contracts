@@ -837,59 +837,24 @@ contract GasProfilerTest is Test {
         nexusSettler.fill(orderId, originData, "");
         gasNexus = gasNexus - gasleft();
         
-        // ============ DIRECT FILL FLOW ============
+        // ============ DIRECT FILL FLOW (Pure Transfers) ============
         address filler2 = makeAddr("filler2_aave");
         
-        // Setup tokens and approvals for filler2
-        tokenA.mint(filler2, INITIAL_BALANCE);
-        vm.startPrank(filler2);
-        tokenA.approve(address(directFill), type(uint256).max);
-        vm.stopPrank();
+        // Fund owner and filler2
+        tokenA.mint(owner, LOCK_AMOUNT);
+        tokenA.mint(filler2, LOCK_AMOUNT);
         
-        // Setup owner approval for DirectFill
-        vm.startPrank(owner);
-        tokenA.approve(address(directFill), type(uint256).max);
-        vm.stopPrank();
-        
-        // Fund DirectFill with tokens from filler2
-        vm.startPrank(filler2);
-        tokenA.transfer(address(directFill), LOCK_AMOUNT);
-        vm.stopPrank();
-        
-        // Create DirectFillData with direct ERC20 transfer (no external contract)
-        DirectAction[] memory dConditions = new DirectAction[](0);
-        
-        DirectLock[] memory dLocks = new DirectLock[](1);
-        dLocks[0] = DirectLock({
-            token: address(tokenA),
-            amount: LOCK_AMOUNT
-        });
-        
-        DirectFund[] memory dFunds = new DirectFund[](0);
-        
-        // Direct transfer action: DirectFill -> recipient1
-        DirectAction[] memory dActions = new DirectAction[](1);
-        dActions[0] = DirectAction({
-            target: address(tokenA),  // Call token contract directly
-            callData: abi.encodeWithSelector(
-                IERC20.transfer.selector,
-                recipient1,
-                LOCK_AMOUNT
-            ),
-            value: 0
-        });
-        
-        DirectFillData memory data = DirectFillData({
-            conditions: dConditions,
-            locks: dLocks,
-            funds: dFunds,
-            actions: dActions
-        });
-        
-        // Profile DirectFill
-        vm.prank(filler2);
+        // Profile pure transfers (no contract overhead)
         uint256 gasDirect = gasleft();
-        directFill.directFill(owner, data);
+        
+        // Lock: owner -> escrow
+        vm.prank(owner);
+        tokenA.transfer(escrow, LOCK_AMOUNT);
+        
+        // Action: filler2 -> recipient
+        vm.prank(filler2);
+        tokenA.transfer(recipient1, LOCK_AMOUNT);
+        
         gasDirect = gasDirect - gasleft();
         
         // ============ COMPARISON OUTPUT ============
