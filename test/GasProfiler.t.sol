@@ -986,54 +986,21 @@ contract GasProfilerTest is Test {
     }
 
     function testGasSnapshot_AaveDeposit_Direct() public {
-        // Setup tokens and approvals
-        vm.startPrank(owner);
-        tokenA.approve(address(directFill), type(uint256).max);
-        vm.stopPrank();
+        // This test shows the absolute baseline: pure ERC20 transfers without ANY contract overhead
+        // No DirectFill contract, no NexusSettler - just direct token transfers
         
-        tokenA.mint(filler, INITIAL_BALANCE);
-        vm.startPrank(filler);
-        tokenA.approve(address(directFill), type(uint256).max);
-        vm.stopPrank();
+        // Fund owner and filler
+        tokenA.mint(owner, LOCK_AMOUNT);
+        tokenA.mint(filler, LOCK_AMOUNT);
         
-        // Fund DirectFill with tokens from filler
-        vm.startPrank(filler);
-        tokenA.transfer(address(directFill), LOCK_AMOUNT);
-        vm.stopPrank();
+        // Execute pure transfers (no contract overhead)
+        // Lock: owner -> escrow
+        vm.prank(owner);
+        tokenA.transfer(escrow, LOCK_AMOUNT);
         
-        // Create DirectFillData with direct ERC20 transfer (no external contract)
-        DirectAction[] memory conditions = new DirectAction[](0);
-        
-        DirectLock[] memory locks = new DirectLock[](1);
-        locks[0] = DirectLock({
-            token: address(tokenA),
-            amount: LOCK_AMOUNT
-        });
-        
-        DirectFund[] memory funds = new DirectFund[](0);
-        
-        // Direct transfer action: DirectFill -> recipient1
-        DirectAction[] memory actions = new DirectAction[](1);
-        actions[0] = DirectAction({
-            target: address(tokenA),  // Call token contract directly
-            callData: abi.encodeWithSelector(
-                IERC20.transfer.selector,
-                recipient1,
-                LOCK_AMOUNT
-            ),
-            value: 0
-        });
-        
-        DirectFillData memory data = DirectFillData({
-            conditions: conditions,
-            locks: locks,
-            funds: funds,
-            actions: actions
-        });
-        
-        // Execute directFill (no gasleft() - snapshot measures differently)
+        // Action: filler -> recipient
         vm.prank(filler);
-        directFill.directFill(owner, data);
+        tokenA.transfer(recipient1, LOCK_AMOUNT);
     }
 
     // ============ Swap Helper Functions ============
