@@ -9,6 +9,13 @@ import "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../src/NexusSettler.sol";
 import "../src/interfaces/INexusSettler.sol";
 import "../src/interfaces/IActionRouter.sol";
+import "../src/routers/UniswapV4Router.sol";
+import "./mocks/MockUniversalRouter.sol";
+import "./mocks/MockPoolManager.sol";
+import "./mocks/MockV4SwapRouter.sol";
+import {PoolKey} from "lib/v4-core/src/types/PoolKey.sol";
+import {Currency} from "lib/v4-core/src/types/Currency.sol";
+import {IHooks} from "lib/v4-core/src/interfaces/IHooks.sol";
 
 // Mock ERC20 token for testing
 contract MockERC20 is ERC20 {
@@ -213,6 +220,17 @@ contract GasProfilerTest is Test {
     uint256 constant LOCK_AMOUNT = 100e18;
     uint256 constant FUND_AMOUNT = 50e18;
 
+    // Swap testing infrastructure
+    UniswapV4Router public uniswapV4Router;
+    MockUniversalRouter public mockUniversalRouter;
+    MockPoolManager public mockPoolManager;
+    MockV4SwapRouter public mockV4SwapRouter;
+
+    // Swap constants
+    uint256 constant SWAP_AMOUNT_IN = 1000e18;
+    uint256 constant SWAP_MIN_AMOUNT_OUT = 997e18; // 0.3% slippage
+    uint24 constant SWAP_FEE = 3000; // 0.3% fee tier
+
     function setUp() public {
         // Setup addresses
         escrow = makeAddr("escrow");
@@ -255,6 +273,53 @@ contract GasProfilerTest is Test {
         tokenB.approve(address(directFill), type(uint256).max);
         tokenC.approve(address(nexusSettler), type(uint256).max);
         tokenC.approve(address(directFill), type(uint256).max);
+        vm.stopPrank();
+
+        // Deploy mock contracts for swap testing
+        mockPoolManager = new MockPoolManager();
+        mockUniversalRouter = new MockUniversalRouter(address(mockPoolManager));
+        mockV4SwapRouter = new MockV4SwapRouter(address(mockPoolManager));
+
+        // Deploy UniswapV4Router with mock UniversalRouter
+        uniswapV4Router = new UniswapV4Router(address(mockUniversalRouter), address(0));
+
+        // Initialize pool with liquidity
+        address token0 = address(tokenA) < address(tokenB) ? address(tokenA) : address(tokenB);
+        address token1 = address(tokenA) < address(tokenB) ? address(tokenB) : address(tokenA);
+        
+        // Create pool key for initialization
+        PoolKey memory key = PoolKey({
+            currency0: Currency.wrap(token0),
+            currency1: Currency.wrap(token1),
+            fee: SWAP_FEE,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        
+        // Mint tokens to this contract for pool initialization
+        tokenA.mint(address(this), 1000000e18);
+        tokenB.mint(address(this), 1000000e18);
+        
+        // Approve pool manager
+        IERC20(token0).approve(address(mockPoolManager), type(uint256).max);
+        IERC20(token1).approve(address(mockPoolManager), type(uint256).max);
+        
+        // Initialize pool
+        mockPoolManager.initializePool(key, 1000000e18, 1000000e18);
+        
+        // Approve tokens for swap routers
+        vm.startPrank(owner);
+        tokenA.approve(address(mockUniversalRouter), type(uint256).max);
+        tokenA.approve(address(mockV4SwapRouter), type(uint256).max);
+        tokenB.approve(address(mockUniversalRouter), type(uint256).max);
+        tokenB.approve(address(mockV4SwapRouter), type(uint256).max);
+        vm.stopPrank();
+        
+        vm.startPrank(filler);
+        tokenA.approve(address(mockUniversalRouter), type(uint256).max);
+        tokenA.approve(address(mockV4SwapRouter), type(uint256).max);
+        tokenB.approve(address(mockUniversalRouter), type(uint256).max);
+        tokenB.approve(address(mockV4SwapRouter), type(uint256).max);
         vm.stopPrank();
     }
 
@@ -376,61 +441,55 @@ contract GasProfilerTest is Test {
     }
 
     function testGasProfile_AaveDeposit_Direct() public {
-        // Deploy MockAavePool
-        MockAavePool aavePool = new MockAavePool();
-        
-        // Deploy aToken for tokenA
-        MockAToken aTokenA = new MockAToken("aToken A", "aTKA");
-        aTokenA.setMinter(address(aavePool));
-        aavePool.setATokenForAsset(address(tokenA), address(aTokenA));
-        
-        // Setup: Fund DirectFill with tokens (AavePool pulls from DirectFill as msg.sender)
-        vm.startPrank(filler);
+        // Setup: Approve tokens for DirectFill
+        vm.startPrank(owner);
         tokenA.approve(address(directFill), type(uint256).max);
-        // Transfer tokens to DirectFill so it can supply to Aave
+        vm.stopPrank();
+
+        // Create DirectFillData with direct ERC20 transfer (no external contract calls)
+        DirectAction[] memory conditions = new DirectAction[](0);
+
+        // Lock: owner -> escrow (same as NexusSettler)
+        DirectLock[] memory locks = new DirectLock[](1);
+        locks[0] = DirectLock({
+            token: address(tokenA),
+            amount: LOCK_AMOUNT
+        });
+
+        DirectFund[] memory funds = new DirectFund[](0);
+
+        // Fund DirectFill with tokens from filler first
+        // This simulates: filler provides tokens to DirectFill for the transfer action
+        vm.startPrank(filler);
         tokenA.transfer(address(directFill), LOCK_AMOUNT);
         vm.stopPrank();
-        
-        // DirectFill needs to approve AavePool to spend its tokens
-        vm.startPrank(address(directFill));
-        tokenA.approve(address(aavePool), type(uint256).max);
-        vm.stopPrank();
-        
-        // Create DirectFillData with supply action (no lock - DirectFill supplies tokens directly)
-        DirectAction[] memory conditions = new DirectAction[](0);
-        
-        DirectLock[] memory locks = new DirectLock[](0);
-        
-        DirectFund[] memory funds = new DirectFund[](0);
-        
-        // Create supply action
+
+        // Create action: DirectFill transfers tokens to recipient (direct ERC20 transfer)
+        // This is the baseline without external contract call overhead
         DirectAction[] memory actions = new DirectAction[](1);
-        bytes memory supplyCallData = abi.encodeWithSelector(
-            MockAavePool.supply.selector,
-            address(tokenA),
-            LOCK_AMOUNT,
-            owner,  // onBehalfOf
-            uint16(0)  // referralCode
-        );
         actions[0] = DirectAction({
-            target: address(aavePool),
-            callData: supplyCallData,
+            target: address(tokenA),
+            callData: abi.encodeWithSelector(
+                IERC20.transfer.selector,
+                recipient1,
+                LOCK_AMOUNT
+            ),
             value: 0
         });
-        
+
         DirectFillData memory data = DirectFillData({
             conditions: conditions,
             locks: locks,
             funds: funds,
             actions: actions
         });
-        
+
         // Profile gas for direct fill operation
         vm.prank(filler);
         uint256 gasStart = gasleft();
         directFill.directFill(owner, data);
         uint256 gasUsed = gasStart - gasleft();
-        
+
         console2.log("=== DirectFill Aave Deposit Gas Profile ===");
         console2.log("Gas used:", gasUsed);
     }
@@ -1039,5 +1098,90 @@ contract GasProfilerTest is Test {
         // Execute directFill (no gasleft() - snapshot measures differently)
         vm.prank(filler);
         directFill.directFill(owner, data);
+    }
+
+    // ============ Swap Helper Functions ============
+
+    function createSwapIntent(bool exactOut) internal view returns (INexusSettler.Intent memory) {
+        // Create PoolKey with proper token ordering
+        address token0 = address(tokenA) < address(tokenB) ? address(tokenA) : address(tokenB);
+        address token1 = address(tokenA) < address(tokenB) ? address(tokenB) : address(tokenA);
+
+        PoolKey memory key = PoolKey({
+            currency0: Currency.wrap(token0),
+            currency1: Currency.wrap(token1),
+            fee: SWAP_FEE,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+
+        // Create Swap struct
+        UniswapV4Router.Swap memory swap = UniswapV4Router.Swap({
+            key: key,
+            maxAmountIn: uint128(SWAP_AMOUNT_IN),
+            minAmountOut: uint128(SWAP_MIN_AMOUNT_OUT),
+            zeroForOne: address(tokenA) == token0, // true if tokenA is currency0
+            exactOut: exactOut,
+            deadline: block.timestamp + 1 hours,
+            destination: recipient1
+        });
+
+        // Create Action
+        INexusSettler.Action[] memory actions = new INexusSettler.Action[](1);
+        actions[0] = INexusSettler.Action({
+            actionType: INexusSettler.ActionType.SWAP,
+            target: Strings.toHexString(uint256(uint160(address(uniswapV4Router))), 20),
+            callData: abi.encode(swap),
+            value: 0
+        });
+
+        // Create batch
+        INexusSettler.Actions memory batch = INexusSettler.Actions({
+            domain: string.concat("eip155:", Strings.toString(block.chainid)),
+            settler: bytes32(bytes20(address(nexusSettler))),
+            conditions: new INexusSettler.Action[](0),
+            locks: new INexusSettler.Lock[](0),
+            funds: new INexusSettler.Fund[](0),
+            actions: actions,
+            fees: INexusSettler.Fees(bytes32(0), 0)
+        });
+
+        INexusSettler.Actions[] memory batches = new INexusSettler.Actions[](1);
+        batches[0] = batch;
+
+        return INexusSettler.Intent({
+            domain: string.concat("eip155:", Strings.toString(block.chainid)),
+            batches: batches,
+            sender: bytes32(bytes20(owner)),
+            recipient: bytes32(bytes20(recipient1)),
+            nonce: 1,
+            inputs: new INexusSettler.Resource[](0),
+            outputs: new INexusSettler.Resource[](0)
+        });
+    }
+
+    function createSwapDirectFillData(bool /* exactOut */) internal view returns (DirectFillData memory) {
+        // Create swap action for DirectFill
+        DirectAction[] memory actions = new DirectAction[](1);
+
+        // Encode the swap call for MockV4SwapRouter
+        actions[0] = DirectAction({
+            target: address(mockV4SwapRouter),
+            callData: abi.encodeWithSelector(
+                MockV4SwapRouter.executeSwap.selector,
+                address(tokenA),
+                address(tokenB),
+                SWAP_AMOUNT_IN,
+                SWAP_MIN_AMOUNT_OUT
+            ),
+            value: 0
+        });
+
+        return DirectFillData({
+            conditions: new DirectAction[](0),
+            locks: new DirectLock[](0),
+            funds: new DirectFund[](0),
+            actions: actions
+        });
     }
 }
