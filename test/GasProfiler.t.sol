@@ -13,6 +13,7 @@ import "../src/routers/UniswapV4Router.sol";
 import "./mocks/MockUniversalRouter.sol";
 import "./mocks/MockPoolManager.sol";
 import "./mocks/MockV4SwapRouter.sol";
+import "./mocks/MockPermit2.sol";
 import {PoolKey} from "lib/v4-core/src/types/PoolKey.sol";
 import {Currency} from "lib/v4-core/src/types/Currency.sol";
 import {IHooks} from "lib/v4-core/src/interfaces/IHooks.sol";
@@ -225,6 +226,7 @@ contract GasProfilerTest is Test {
     MockUniversalRouter public mockUniversalRouter;
     MockPoolManager public mockPoolManager;
     MockV4SwapRouter public mockV4SwapRouter;
+    MockPermit2 public mockPermit2;
 
     // Swap constants
     uint256 constant SWAP_AMOUNT_IN = 1000e18;
@@ -277,11 +279,12 @@ contract GasProfilerTest is Test {
 
         // Deploy mock contracts for swap testing
         mockPoolManager = new MockPoolManager();
-        mockUniversalRouter = new MockUniversalRouter(address(mockPoolManager));
+        mockPermit2 = new MockPermit2();
+        mockUniversalRouter = new MockUniversalRouter(address(mockPoolManager), address(mockPermit2));
         mockV4SwapRouter = new MockV4SwapRouter(address(mockPoolManager));
 
-        // Deploy UniswapV4Router with mock UniversalRouter
-        uniswapV4Router = new UniswapV4Router(address(mockUniversalRouter), address(0));
+        // Deploy UniswapV4Router with mock UniversalRouter and mock Permit2
+        uniswapV4Router = new UniswapV4Router(address(mockUniversalRouter), address(mockPermit2));
 
         // Initialize pool with liquidity
         address token0 = address(tokenA) < address(tokenB) ? address(tokenA) : address(tokenB);
@@ -441,56 +444,27 @@ contract GasProfilerTest is Test {
     }
 
     function testGasProfile_AaveDeposit_Direct() public {
-        // Setup: Approve tokens for DirectFill
-        vm.startPrank(owner);
-        tokenA.approve(address(directFill), type(uint256).max);
-        vm.stopPrank();
-
-        // Create DirectFillData with direct ERC20 transfer (no external contract calls)
-        DirectAction[] memory conditions = new DirectAction[](0);
-
-        // Lock: owner -> escrow (same as NexusSettler)
-        DirectLock[] memory locks = new DirectLock[](1);
-        locks[0] = DirectLock({
-            token: address(tokenA),
-            amount: LOCK_AMOUNT
-        });
-
-        DirectFund[] memory funds = new DirectFund[](0);
-
-        // Fund DirectFill with tokens from filler first
-        // This simulates: filler provides tokens to DirectFill for the transfer action
-        vm.startPrank(filler);
-        tokenA.transfer(address(directFill), LOCK_AMOUNT);
-        vm.stopPrank();
-
-        // Create action: DirectFill transfers tokens to recipient (direct ERC20 transfer)
-        // This is the baseline without external contract call overhead
-        DirectAction[] memory actions = new DirectAction[](1);
-        actions[0] = DirectAction({
-            target: address(tokenA),
-            callData: abi.encodeWithSelector(
-                IERC20.transfer.selector,
-                recipient1,
-                LOCK_AMOUNT
-            ),
-            value: 0
-        });
-
-        DirectFillData memory data = DirectFillData({
-            conditions: conditions,
-            locks: locks,
-            funds: funds,
-            actions: actions
-        });
-
-        // Profile gas for direct fill operation
-        vm.prank(filler);
+        // This test shows the absolute baseline: pure ERC20 transfers without ANY contract overhead
+        // No DirectFill contract, no NexusSettler - just direct token transfers
+        
+        // Reset state - ensure owner and filler have tokens (from setUp)
+        tokenA.mint(owner, LOCK_AMOUNT);
+        tokenA.mint(filler, LOCK_AMOUNT);
+        
+        // Profile the actual transfers (lock + action)
         uint256 gasStart = gasleft();
-        directFill.directFill(owner, data);
+        
+        // Lock: owner -> escrow (simulating the lock into escrow)
+        vm.prank(owner);
+        tokenA.transfer(escrow, LOCK_AMOUNT);
+        
+        // Action: filler -> recipient (simulating the deposit/transfer)
+        vm.prank(filler);
+        tokenA.transfer(recipient1, LOCK_AMOUNT);
+        
         uint256 gasUsed = gasStart - gasleft();
-
-        console2.log("=== DirectFill Aave Deposit Gas Profile ===");
+        
+        console2.log("=== Direct Aave Deposit Gas Profile (No Contract) ===");
         console2.log("Gas used:", gasUsed);
     }
 
@@ -1204,6 +1178,16 @@ contract GasProfilerTest is Test {
         tokenA.approve(address(nexusSettler), type(uint256).max);
         vm.stopPrank();
 
+        // Fund NexusSettler with tokens for the swap
+        vm.startPrank(swapFiller);
+        tokenA.transfer(address(nexusSettler), SWAP_AMOUNT_IN);
+        vm.stopPrank();
+
+        // NexusSettler approves UniswapV4Router
+        vm.startPrank(address(nexusSettler));
+        tokenA.approve(address(uniswapV4Router), type(uint256).max);
+        vm.stopPrank();
+
         // Open order
         vm.prank(owner);
         nexusSettler.open(order);
@@ -1267,6 +1251,16 @@ contract GasProfilerTest is Test {
         tokenA.mint(swapFillerOut, INITIAL_BALANCE);
         vm.startPrank(swapFillerOut);
         tokenA.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+
+        // Fund NexusSettler with tokens for the swap
+        vm.startPrank(swapFillerOut);
+        tokenA.transfer(address(nexusSettler), SWAP_AMOUNT_IN);
+        vm.stopPrank();
+
+        // NexusSettler approves UniswapV4Router
+        vm.startPrank(address(nexusSettler));
+        tokenA.approve(address(uniswapV4Router), type(uint256).max);
         vm.stopPrank();
 
         // Open order
