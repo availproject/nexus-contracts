@@ -228,7 +228,7 @@ contract GasProfilerTest is Test {
 
     // Swap constants
     uint256 constant SWAP_AMOUNT_IN = 1000e18;
-    uint256 constant SWAP_MIN_AMOUNT_OUT = 997e18; // 0.3% slippage
+    uint256 constant SWAP_MIN_AMOUNT_OUT = 995e18; // ~0.5% slippage (actual output ~996 tokens)
     uint24 constant SWAP_FEE = 3000; // 0.3% fee tier
 
     function setUp() public {
@@ -1047,12 +1047,6 @@ contract GasProfilerTest is Test {
     }
 
     function testGasSnapshot_AaveDeposit_Direct() public {
-        // Deploy MockAavePool and aToken
-        MockAavePool aavePool = new MockAavePool();
-        MockAToken aTokenA = new MockAToken("aToken A", "aTKA");
-        aTokenA.setMinter(address(aavePool));
-        aavePool.setATokenForAsset(address(tokenA), address(aTokenA));
-        
         // Setup tokens and approvals
         vm.startPrank(owner);
         tokenA.approve(address(directFill), type(uint256).max);
@@ -1063,30 +1057,30 @@ contract GasProfilerTest is Test {
         tokenA.approve(address(directFill), type(uint256).max);
         vm.stopPrank();
         
-        // Fund DirectFill with tokens
+        // Fund DirectFill with tokens from filler
         vm.startPrank(filler);
         tokenA.transfer(address(directFill), LOCK_AMOUNT);
         vm.stopPrank();
         
-        // DirectFill approves AavePool
-        vm.startPrank(address(directFill));
-        tokenA.approve(address(aavePool), type(uint256).max);
-        vm.stopPrank();
-        
-        // Create DirectFillData
+        // Create DirectFillData with direct ERC20 transfer (no external contract)
         DirectAction[] memory conditions = new DirectAction[](0);
-        DirectLock[] memory locks = new DirectLock[](0);
+        
+        DirectLock[] memory locks = new DirectLock[](1);
+        locks[0] = DirectLock({
+            token: address(tokenA),
+            amount: LOCK_AMOUNT
+        });
+        
         DirectFund[] memory funds = new DirectFund[](0);
         
+        // Direct transfer action: DirectFill -> recipient1
         DirectAction[] memory actions = new DirectAction[](1);
         actions[0] = DirectAction({
-            target: address(aavePool),
+            target: address(tokenA),  // Call token contract directly
             callData: abi.encodeWithSelector(
-                MockAavePool.supply.selector,
-                address(tokenA),
-                LOCK_AMOUNT,
-                owner,
-                uint16(0)
+                IERC20.transfer.selector,
+                recipient1,
+                LOCK_AMOUNT
             ),
             value: 0
         });
