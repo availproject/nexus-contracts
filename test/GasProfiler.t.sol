@@ -890,4 +890,154 @@ contract GasProfilerTest is Test {
         vm.prank(filler);
         directFill.directFill(owner, data);
     }
+
+    // ============ Aave Deposit Snapshot Tests ============
+
+    function testGasSnapshot_AaveDeposit_NexusSettler() public {
+        // Deploy MockAavePool and aToken
+        MockAavePool aavePool = new MockAavePool();
+        MockAToken aTokenA = new MockAToken("aToken A", "aTKA");
+        aTokenA.setMinter(address(aavePool));
+        aavePool.setATokenForAsset(address(tokenA), address(aTokenA));
+        
+        // Setup tokens and approvals
+        vm.startPrank(owner);
+        tokenA.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+        
+        tokenA.mint(filler, INITIAL_BALANCE);
+        vm.startPrank(filler);
+        tokenA.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+        
+        // Create Intent with supply action
+        INexusSettler.Action[] memory conditions = new INexusSettler.Action[](0);
+        
+        INexusSettler.Lock[] memory locks = new INexusSettler.Lock[](1);
+        locks[0] = INexusSettler.Lock({
+            token: bytes32(bytes20(address(tokenA))),
+            amount: LOCK_AMOUNT
+        });
+        
+        INexusSettler.Fund[] memory funds = new INexusSettler.Fund[](1);
+        funds[0] = INexusSettler.Fund({
+            recipient: bytes32(bytes20(address(aavePool))),
+            token: bytes32(bytes20(address(tokenA))),
+            amount: LOCK_AMOUNT
+        });
+        
+        INexusSettler.Action[] memory actions = new INexusSettler.Action[](1);
+        bytes memory supplyCallData = abi.encodeWithSelector(
+            MockAavePool.supply.selector,
+            address(tokenA),
+            LOCK_AMOUNT,
+            owner,
+            uint16(0)
+        );
+        actions[0] = INexusSettler.Action({
+            actionType: INexusSettler.ActionType.SWAP,
+            target: Strings.toHexString(uint256(uint160(address(aavePool))), 20),
+            callData: supplyCallData,
+            value: 0
+        });
+        
+        INexusSettler.Actions memory batch = INexusSettler.Actions({
+            domain: string.concat("eip155:", Strings.toString(block.chainid)),
+            settler: bytes32(bytes20(address(nexusSettler))),
+            conditions: conditions,
+            locks: locks,
+            funds: funds,
+            actions: actions,
+            fees: INexusSettler.Fees(bytes32(0), 0)
+        });
+        
+        INexusSettler.Actions[] memory batches = new INexusSettler.Actions[](1);
+        batches[0] = batch;
+        
+        INexusSettler.Resource[] memory inputs = new INexusSettler.Resource[](0);
+        INexusSettler.Resource[] memory outputs = new INexusSettler.Resource[](0);
+        
+        INexusSettler.Intent memory intent = INexusSettler.Intent({
+            domain: string.concat("eip155:", Strings.toString(block.chainid)),
+            batches: batches,
+            sender: bytes32(bytes20(owner)),
+            recipient: bytes32(bytes20(owner)),
+            nonce: 1,
+            inputs: inputs,
+            outputs: outputs
+        });
+        
+        bytes memory originData = abi.encode(intent);
+        bytes32 orderId = keccak256(originData);
+        
+        IERC7683.OnchainCrossChainOrder memory order = IERC7683.OnchainCrossChainOrder({
+            fillDeadline: uint32(block.timestamp + 1 hours),
+            orderDataType: keccak256("Intent(string domain,Actions[] batch,bytes32 sender,bytes32 recipient,uint256 nonce)"),
+            orderData: originData
+        });
+        
+        vm.prank(owner);
+        nexusSettler.open(order);
+        
+        // Execute fill (no gasleft() - snapshot measures differently)
+        vm.prank(filler);
+        nexusSettler.fill(orderId, originData, "");
+    }
+
+    function testGasSnapshot_AaveDeposit_Direct() public {
+        // Deploy MockAavePool and aToken
+        MockAavePool aavePool = new MockAavePool();
+        MockAToken aTokenA = new MockAToken("aToken A", "aTKA");
+        aTokenA.setMinter(address(aavePool));
+        aavePool.setATokenForAsset(address(tokenA), address(aTokenA));
+        
+        // Setup tokens and approvals
+        vm.startPrank(owner);
+        tokenA.approve(address(directFill), type(uint256).max);
+        vm.stopPrank();
+        
+        tokenA.mint(filler, INITIAL_BALANCE);
+        vm.startPrank(filler);
+        tokenA.approve(address(directFill), type(uint256).max);
+        vm.stopPrank();
+        
+        // Fund DirectFill with tokens
+        vm.startPrank(filler);
+        tokenA.transfer(address(directFill), LOCK_AMOUNT);
+        vm.stopPrank();
+        
+        // DirectFill approves AavePool
+        vm.startPrank(address(directFill));
+        tokenA.approve(address(aavePool), type(uint256).max);
+        vm.stopPrank();
+        
+        // Create DirectFillData
+        DirectAction[] memory conditions = new DirectAction[](0);
+        DirectLock[] memory locks = new DirectLock[](0);
+        DirectFund[] memory funds = new DirectFund[](0);
+        
+        DirectAction[] memory actions = new DirectAction[](1);
+        actions[0] = DirectAction({
+            target: address(aavePool),
+            callData: abi.encodeWithSelector(
+                MockAavePool.supply.selector,
+                address(tokenA),
+                LOCK_AMOUNT,
+                owner,
+                uint16(0)
+            ),
+            value: 0
+        });
+        
+        DirectFillData memory data = DirectFillData({
+            conditions: conditions,
+            locks: locks,
+            funds: funds,
+            actions: actions
+        });
+        
+        // Execute directFill (no gasleft() - snapshot measures differently)
+        vm.prank(filler);
+        directFill.directFill(owner, data);
+    }
 }
