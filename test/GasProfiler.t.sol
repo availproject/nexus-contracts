@@ -8,6 +8,7 @@ import "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../src/NexusSettler.sol";
 import "../src/interfaces/INexusSettler.sol";
+import "../src/interfaces/IActionRouter.sol";
 
 // Mock ERC20 token for testing
 contract MockERC20 is ERC20 {
@@ -62,18 +63,27 @@ contract MockAavePool {
         aTokenForAsset[asset] = aToken;
     }
 
-    // Execute function to handle action calls from NexusSettler
-    function execute(bytes calldata actionData) external payable {
+    // Execute function to handle action calls from NexusSettler (IActionRouter interface)
+    function execute(
+        INexusSettler.Action calldata action,
+        bytes calldata /* data */
+    ) external payable returns (bytes memory) {
+        // The action.callData contains the supply function selector + parameters
+        // Skip the first 4 bytes (function selector) and decode parameters
+        bytes calldata params = action.callData[4:];
         (address asset, uint256 amount, address onBehalfOf, uint16 referralCode) = abi.decode(
-            actionData,
+            params,
             (address, uint256, address, uint16)
         );
         _supply(asset, amount, onBehalfOf);
+        return "";
     }
 
     // Internal function to handle supply logic
+    // Note: Tokens are already transferred to this contract via Fund in the intent
+    // So we only need to track supply and mint aTokens
     function _supply(address asset, uint256 amount, address onBehalfOf) internal {
-        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
+        // Tokens already transferred via Fund - just track supply
         supplied[onBehalfOf][asset] += amount;
         address aToken = aTokenForAsset[asset];
         if (aToken != address(0)) {
@@ -89,19 +99,7 @@ contract MockAavePool {
         address onBehalfOf,
         uint16 referralCode // Unused but included for interface compatibility
     ) external {
-        // Transfer tokens from caller (NexusSettler or DirectFill)
-        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
-
-        // Track supply
-        supplied[onBehalfOf][asset] += amount;
-
-        // Mint aTokens to the user if aToken is configured
-        address aToken = aTokenForAsset[asset];
-        if (aToken != address(0)) {
-            MockAToken(aToken).mint(onBehalfOf, amount);
-        }
-
-        emit Supply(asset, onBehalfOf, amount);
+        _supply(asset, amount, onBehalfOf);
     }
 
     function getSupplied(address user, address asset) external view returns (uint256) {
@@ -618,21 +616,32 @@ contract GasProfilerTest is Test {
         aTokenA.setMinter(address(aavePool));
         aavePool.setATokenForAsset(address(tokenA), address(aTokenA));
         
-        // Setup: Approve tokens
+        // Setup: Approve tokens for owner (for lock) and filler (for fund)
         vm.startPrank(owner);
+        tokenA.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+        
+        vm.startPrank(filler);
         tokenA.approve(address(nexusSettler), type(uint256).max);
         vm.stopPrank();
         
         // Create Intent with supply action
         INexusSettler.Action[] memory conditions = new INexusSettler.Action[](0);
         
+        // Lock: owner locks tokens to escrow
         INexusSettler.Lock[] memory locks = new INexusSettler.Lock[](1);
         locks[0] = INexusSettler.Lock({
             token: bytes32(bytes20(address(tokenA))),
             amount: LOCK_AMOUNT
         });
         
-        INexusSettler.Fund[] memory funds = new INexusSettler.Fund[](0);
+        // Fund: filler provides tokens for the supply action
+        INexusSettler.Fund[] memory funds = new INexusSettler.Fund[](1);
+        funds[0] = INexusSettler.Fund({
+            recipient: bytes32(bytes20(address(aavePool))), // Send to AavePool
+            token: bytes32(bytes20(address(tokenA))),
+            amount: LOCK_AMOUNT
+        });
         
         // Create supply action
         INexusSettler.Action[] memory actions = new INexusSettler.Action[](1);
