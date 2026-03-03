@@ -1239,4 +1239,193 @@ contract GasProfilerTest is Test {
         console2.log("=== DirectFill Swap ExactOut Gas ===");
         console2.log("Gas used:", gasUsed);
     }
+
+    function testGasProfile_SwapExactIn_Comparison() public {
+        uint256 state = vm.snapshot();
+
+        // ============ NEXUS SETTLER FLOW ============
+        address filler1 = makeAddr("filler1_swap_exactin");
+        tokenA.mint(filler1, INITIAL_BALANCE);
+        vm.startPrank(filler1);
+        tokenA.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+
+        vm.startPrank(filler1);
+        tokenA.transfer(address(nexusSettler), SWAP_AMOUNT_IN);
+        vm.stopPrank();
+
+        vm.startPrank(address(nexusSettler));
+        tokenA.approve(address(uniswapV4Router), type(uint256).max);
+        vm.stopPrank();
+
+        INexusSettler.Intent memory intent = createSwapIntent(false);
+        bytes memory originData = abi.encode(intent);
+        bytes32 orderId = keccak256(originData);
+
+        IERC7683.OnchainCrossChainOrder memory order = IERC7683.OnchainCrossChainOrder({
+            fillDeadline: uint32(block.timestamp + 1 hours),
+            orderDataType: keccak256("Intent(string domain,Actions[] batch,bytes32 sender,bytes32 recipient,uint256 nonce)"),
+            orderData: originData
+        });
+
+        vm.prank(owner);
+        nexusSettler.open(order);
+
+        vm.prank(filler1);
+        uint256 gasNexus = gasleft();
+        nexusSettler.fill(orderId, originData, "");
+        gasNexus = gasNexus - gasleft();
+
+        vm.revertTo(state);
+
+        // ============ DIRECT FILL FLOW ============
+        address filler2 = makeAddr("filler2_swap_exactin");
+        tokenA.mint(filler2, INITIAL_BALANCE);
+        vm.startPrank(filler2);
+        tokenA.approve(address(directFill), type(uint256).max);
+        vm.stopPrank();
+
+        vm.startPrank(filler2);
+        tokenA.transfer(address(directFill), SWAP_AMOUNT_IN);
+        vm.stopPrank();
+
+        vm.startPrank(address(directFill));
+        tokenA.approve(address(mockV4SwapRouter), type(uint256).max);
+        vm.stopPrank();
+
+        DirectFillData memory data = createSwapDirectFillData(false);
+
+        vm.prank(filler2);
+        uint256 gasDirect = gasleft();
+        directFill.directFill(owner, data);
+        gasDirect = gasDirect - gasleft();
+
+        // ============ COMPARISON OUTPUT ============
+        console2.log("\n=== Gas Comparison (Swap ExactIn) ===");
+        console2.log("NexusSettler gas used:", gasNexus);
+        console2.log("DirectFill gas used:", gasDirect);
+        console2.log("Overhead:", gasNexus - gasDirect);
+        console2.log("Overhead %:", ((gasNexus - gasDirect) * 100) / gasDirect, "%");
+    }
+
+    function testGasProfile_SwapExactOut_Comparison() public {
+        uint256 state = vm.snapshot();
+
+        // ============ NEXUS SETTLER FLOW ============
+        address filler1 = makeAddr("filler1_swap_exactout");
+        tokenA.mint(filler1, INITIAL_BALANCE);
+        vm.startPrank(filler1);
+        tokenA.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+
+        vm.startPrank(filler1);
+        tokenA.transfer(address(nexusSettler), SWAP_AMOUNT_IN);
+        vm.stopPrank();
+
+        vm.startPrank(address(nexusSettler));
+        tokenA.approve(address(uniswapV4Router), type(uint256).max);
+        vm.stopPrank();
+
+        INexusSettler.Intent memory intent = createSwapIntent(true);
+        bytes memory originData = abi.encode(intent);
+        bytes32 orderId = keccak256(originData);
+
+        IERC7683.OnchainCrossChainOrder memory order = IERC7683.OnchainCrossChainOrder({
+            fillDeadline: uint32(block.timestamp + 1 hours),
+            orderDataType: keccak256("Intent(string domain,Actions[] batch,bytes32 sender,bytes32 recipient,uint256 nonce)"),
+            orderData: originData
+        });
+
+        vm.prank(owner);
+        nexusSettler.open(order);
+
+        vm.prank(filler1);
+        uint256 gasNexus = gasleft();
+        nexusSettler.fill(orderId, originData, "");
+        gasNexus = gasNexus - gasleft();
+
+        vm.revertTo(state);
+
+        // ============ DIRECT FILL FLOW ============
+        address filler2 = makeAddr("filler2_swap_exactout");
+        tokenA.mint(filler2, INITIAL_BALANCE);
+        vm.startPrank(filler2);
+        tokenA.approve(address(directFill), type(uint256).max);
+        vm.stopPrank();
+
+        vm.startPrank(filler2);
+        tokenA.transfer(address(directFill), SWAP_AMOUNT_IN);
+        vm.stopPrank();
+
+        vm.startPrank(address(directFill));
+        tokenA.approve(address(mockV4SwapRouter), type(uint256).max);
+        vm.stopPrank();
+
+        DirectFillData memory data = createSwapDirectFillData(true);
+
+        vm.prank(filler2);
+        uint256 gasDirect = gasleft();
+        directFill.directFill(owner, data);
+        gasDirect = gasDirect - gasleft();
+
+        // ============ COMPARISON OUTPUT ============
+        console2.log("\n=== Gas Comparison (Swap ExactOut) ===");
+        console2.log("NexusSettler gas used:", gasNexus);
+        console2.log("DirectFill gas used:", gasDirect);
+        console2.log("Overhead:", gasNexus - gasDirect);
+        console2.log("Overhead %:", ((gasNexus - gasDirect) * 100) / gasDirect, "%");
+    }
+
+    function testGasSnapshot_Swap_NexusSettler() public {
+        INexusSettler.Intent memory intent = createSwapIntent(false);
+        bytes memory originData = abi.encode(intent);
+        bytes32 orderId = keccak256(originData);
+
+        IERC7683.OnchainCrossChainOrder memory order = IERC7683.OnchainCrossChainOrder({
+            fillDeadline: uint32(block.timestamp + 1 hours),
+            orderDataType: keccak256("Intent(string domain,Actions[] batch,bytes32 sender,bytes32 recipient,uint256 nonce)"),
+            orderData: originData
+        });
+
+        address swapFillerSnap = makeAddr("swapFillerSnap");
+        tokenA.mint(swapFillerSnap, INITIAL_BALANCE);
+        vm.startPrank(swapFillerSnap);
+        tokenA.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+
+        vm.startPrank(swapFillerSnap);
+        tokenA.transfer(address(nexusSettler), SWAP_AMOUNT_IN);
+        vm.stopPrank();
+
+        vm.startPrank(address(nexusSettler));
+        tokenA.approve(address(uniswapV4Router), type(uint256).max);
+        vm.stopPrank();
+
+        vm.prank(owner);
+        nexusSettler.open(order);
+
+        vm.prank(swapFillerSnap);
+        nexusSettler.fill(orderId, originData, "");
+    }
+
+    function testGasSnapshot_Swap_DirectFill() public {
+        address swapFillerDirectSnap = makeAddr("swapFillerDirectSnap");
+        tokenA.mint(swapFillerDirectSnap, INITIAL_BALANCE);
+        vm.startPrank(swapFillerDirectSnap);
+        tokenA.approve(address(directFill), type(uint256).max);
+        vm.stopPrank();
+
+        vm.startPrank(swapFillerDirectSnap);
+        tokenA.transfer(address(directFill), SWAP_AMOUNT_IN);
+        vm.stopPrank();
+
+        vm.startPrank(address(directFill));
+        tokenA.approve(address(mockV4SwapRouter), type(uint256).max);
+        vm.stopPrank();
+
+        DirectFillData memory data = createSwapDirectFillData(false);
+
+        vm.prank(swapFillerDirectSnap);
+        directFill.directFill(owner, data);
+    }
 }
