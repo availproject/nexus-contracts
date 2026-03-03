@@ -1431,17 +1431,17 @@ contract GasProfilerTest is Test {
     
     // ============ Minimal Direct Transfer Comparison ============
     
-    /// @notice Compare NexusSettler swap flow against minimal ERC20 transfer (no contract calls)
-    /// This shows the absolute minimum gas cost vs full NexusSettler overhead
+    /// @notice Compare NexusSettler fill() operation against minimal ERC20 transfer (no contract calls)
+    /// This shows the gas cost of JUST the fill operation vs raw transfer
     function testGasProfile_SwapVsMinimalTransfer_Comparison() public {
-        // ============ NEXUS SETTLER FLOW (with swap) ============
+        // ============ SETUP (not measured) ============
         address nexusFiller = makeAddr("nexusFiller_minimal");
         tokenA.mint(nexusFiller, INITIAL_BALANCE);
         vm.startPrank(nexusFiller);
         tokenA.approve(address(nexusSettler), type(uint256).max);
         vm.stopPrank();
         
-        // Setup and open order
+        // Setup and open order (NOT measured - just preparation)
         INexusSettler.Intent memory intent = createSwapIntent(false); // exactIn
         bytes memory originData = abi.encode(intent);
         bytes32 orderId = keccak256(originData);
@@ -1465,7 +1465,7 @@ contract GasProfilerTest is Test {
         tokenA.approve(address(uniswapV4Router), type(uint256).max);
         vm.stopPrank();
         
-        // Profile NexusSettler with swap
+        // ============ MEASURE NEXUS SETTLER FILL ONLY ============
         vm.prank(nexusFiller);
         uint256 gasNexus = gasleft();
         nexusSettler.fill(orderId, originData, "");
@@ -1474,7 +1474,7 @@ contract GasProfilerTest is Test {
         // Snapshot state to revert for fair comparison
         uint256 snapshot = vm.snapshot();
         
-        // ============ MINIMAL DIRECT TRANSFER (no contract calls) ============
+        // ============ MEASURE MINIMAL DIRECT TRANSFER ============
         address directFiller = makeAddr("directFiller_minimal");
         tokenA.mint(directFiller, INITIAL_BALANCE);
         
@@ -1488,13 +1488,13 @@ contract GasProfilerTest is Test {
         vm.revertTo(snapshot);
         
         // ============ COMPARISON OUTPUT ============
-        console2.log("\n=== Gas Comparison: NexusSettler Swap vs Minimal ERC20 Transfer ===");
-        console2.log("NexusSettler (with swap) gas used:", gasNexus);
+        console2.log("\n=== Gas Comparison: NexusSettler fill() vs Minimal ERC20 Transfer ===");
+        console2.log("NexusSettler fill() gas used:", gasNexus);
         console2.log("Minimal ERC20 transfer gas used:", gasDirect);
         console2.log("Overhead:", gasNexus - gasDirect);
         if (gasDirect > 0) {
             console2.log("Overhead %:", ((gasNexus - gasDirect) * 100) / gasDirect, "%");
         }
-        console2.log("Note: Minimal transfer is just raw ERC20.transfer() - no contracts, no validation");
+        console2.log("Note: Setup (open, approvals, funding) NOT included - only fill() operation measured");
     }
 }
