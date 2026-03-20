@@ -917,3 +917,236 @@ contract NexusSettlerTest is Test {
         nexusSettler.createPI(rootHash, signature, nonce, s, d, o);
     }
 }
+
+// ============================================================================
+// Mock Token for Gas Comparison
+// ============================================================================
+
+/**
+ * @title MockGasComparisonToken
+ * @notice Simple ERC20-like token for gas benchmarking
+ */
+contract MockGasComparisonToken {
+    mapping(address => uint256) public balances;
+    
+    function mint(address to, uint256 amount) external {
+        balances[to] += amount;
+    }
+    
+    function transfer(address to, uint256 amount) external returns (bool) {
+        require(balances[msg.sender] >= amount, "Insufficient balance");
+        balances[msg.sender] -= amount;
+        balances[to] += amount;
+        return true;
+    }
+    
+    function balanceOf(address account) external view returns (uint256) {
+        return balances[account];
+    }
+}
+
+// ============================================================================
+// Gas Comparison Test Contract
+// ============================================================================
+
+/**
+ * @title NexusSettlerGasComparisonTest
+ * @notice Gas comparison between direct action vs settler-mediated action
+ */
+contract NexusSettlerGasComparisonTest is Test {
+    NexusSettler public nexusSettler;
+    MockGasComparisonToken public token;
+    address public escrow;
+    address public user;
+    address public recipient;
+    uint256 public userPrivateKey;
+    uint256 public constant TRANSFER_AMOUNT = 1000 ether;
+
+    function setUp() public {
+        escrow = makeAddr("escrow");
+        (user, userPrivateKey) = makeAddrAndKey("user");
+        recipient = makeAddr("recipient");
+        
+        nexusSettler = new NexusSettler(escrow);
+        token = new MockGasComparisonToken();
+        
+        token.mint(user, TRANSFER_AMOUNT);
+    }
+
+    function _computeDigest(bytes32 structHash) internal view returns (bytes32) {
+        bytes32 DOMAIN_SEPARATOR = keccak256(abi.encode(
+            keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+            keccak256(bytes("NexusSettler")),
+            keccak256(bytes("2")),
+            block.chainid,
+            address(nexusSettler)
+        ));
+        
+        return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
+    }
+
+    function testGasComparison_DirectVsSettlerTransfer() public {
+        // Scenario 1: Direct transfer
+        vm.startPrank(user);
+        uint256 gasBefore = gasleft();
+        token.transfer(recipient, TRANSFER_AMOUNT);
+        uint256 gasDirect = gasBefore - gasleft();
+        vm.stopPrank();
+        
+        assertEq(token.balanceOf(recipient), TRANSFER_AMOUNT);
+        
+        // Reset and setup settler scenario
+        token.mint(user, TRANSFER_AMOUNT);
+        
+        bytes32 s = keccak256("source");
+        bytes32 d = keccak256("destination");
+        bytes32 o = keccak256("offchain");
+        uint256 nonce = 1;
+        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
+        
+        bytes32 structHash = keccak256(abi.encode(
+            keccak256("NexusPI(bytes32 rootHash,uint256 nonce)"),
+            rootHash,
+            nonce
+        ));
+        bytes32 digest = _computeDigest(structHash);
+        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(userPrivateKey, digest);
+        
+        nexusSettler.createPI(rootHash, abi.encodePacked(r, s_sig, v), nonce, s, d, o);
+        
+        INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](1);
+        path[0] = INexusSettler.IntendNode({
+            next: bytes32(0),
+            target: address(token),
+            data: abi.encodeWithSignature("transfer(address,uint256)", recipient, TRANSFER_AMOUNT)
+        });
+        
+        vm.startPrank(user);
+        token.transfer(address(nexusSettler), TRANSFER_AMOUNT);
+        vm.stopPrank();
+        
+        gasBefore = gasleft();
+        nexusSettler.processPIPath(rootHash, keccak256(abi.encode(rootHash, "source")), path);
+        uint256 gasSettler = gasBefore - gasleft();
+        
+        emit log_named_uint("Direct transfer gas", gasDirect);
+        emit log_named_uint("Settler-mediated gas", gasSettler);
+        emit log_named_uint("Overhead", gasSettler - gasDirect);
+        emit log_named_uint("Overhead %", ((gasSettler - gasDirect) * 100) / gasDirect);
+        
+        assertEq(token.balanceOf(recipient), TRANSFER_AMOUNT * 2);
+    }
+
+    function testGasComparison_OperationBreakdown() public {
+        bytes32 s = keccak256("source");
+        bytes32 d = keccak256("destination");
+        bytes32 o = keccak256("offchain");
+        uint256 nonce = 1;
+        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
+        
+        INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](1);
+        path[0] = INexusSettler.IntendNode({
+            next: bytes32(0),
+            target: address(token),
+            data: abi.encodeWithSignature("transfer(address,uint256)", recipient, TRANSFER_AMOUNT)
+        });
+        
+        // Measure createPI
+        bytes32 structHash = keccak256(abi.encode(
+            keccak256("NexusPI(bytes32 rootHash,uint256 nonce)"),
+            rootHash,
+            nonce
+        ));
+        bytes32 digest = _computeDigest(structHash);
+        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(userPrivateKey, digest);
+        
+        uint256 gasBefore = gasleft();
+        nexusSettler.createPI(rootHash, abi.encodePacked(r, s_sig, v), nonce, s, d, o);
+        uint256 gasCreatePI = gasBefore - gasleft();
+        
+        // Setup for processPIPath
+        vm.startPrank(user);
+        token.transfer(address(nexusSettler), TRANSFER_AMOUNT);
+        vm.stopPrank();
+        
+        // Measure processPIPath
+        gasBefore = gasleft();
+        nexusSettler.processPIPath(rootHash, keccak256(abi.encode(rootHash, "source")), path);
+        uint256 gasProcessPIPath = gasBefore - gasleft();
+        
+        // Measure direct for comparison
+        token.mint(user, TRANSFER_AMOUNT);
+        vm.startPrank(user);
+        gasBefore = gasleft();
+        token.transfer(recipient, TRANSFER_AMOUNT);
+        uint256 gasDirect = gasBefore - gasleft();
+        vm.stopPrank();
+        
+        emit log("=== Gas Breakdown ===");
+        emit log_named_uint("createPI", gasCreatePI);
+        emit log_named_uint("processPIPath", gasProcessPIPath);
+        emit log_named_uint("Total settler", gasCreatePI + gasProcessPIPath);
+        emit log_named_uint("Direct", gasDirect);
+        emit log_named_uint("Overhead", gasCreatePI + gasProcessPIPath - gasDirect);
+    }
+
+    function testGasComparison_MultiNodePath() public {
+        uint256 numTransfers = 3;
+        uint256 amountPerTransfer = TRANSFER_AMOUNT / numTransfers;
+        
+        token.mint(user, TRANSFER_AMOUNT);
+        
+        // Multiple direct transfers
+        vm.startPrank(user);
+        uint256 gasBefore = gasleft();
+        for (uint256 i = 0; i < numTransfers; i++) {
+            token.transfer(recipient, amountPerTransfer);
+        }
+        uint256 gasDirectMulti = gasBefore - gasleft();
+        vm.stopPrank();
+        
+        // Reset
+        token.mint(user, TRANSFER_AMOUNT);
+        
+        // Multi-node settler path
+        bytes32 s = keccak256("multi-source");
+        bytes32 d = keccak256("multi-dest");
+        bytes32 o = keccak256("multi-offchain");
+        uint256 nonce = 2;
+        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
+        
+        bytes32 structHash = keccak256(abi.encode(
+            keccak256("NexusPI(bytes32 rootHash,uint256 nonce)"),
+            rootHash,
+            nonce
+        ));
+        bytes32 digest = _computeDigest(structHash);
+        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(userPrivateKey, digest);
+        
+        nexusSettler.createPI(rootHash, abi.encodePacked(r, s_sig, v), nonce, s, d, o);
+        
+        INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](numTransfers);
+        for (uint256 i = 0; i < numTransfers; i++) {
+            path[i] = INexusSettler.IntendNode({
+                next: i + 1 < numTransfers ? keccak256(abi.encode(path[i + 1])) : bytes32(0),
+                target: address(token),
+                data: abi.encodeWithSignature("transfer(address,uint256)", recipient, amountPerTransfer)
+            });
+        }
+        
+        vm.startPrank(user);
+        token.transfer(address(nexusSettler), TRANSFER_AMOUNT);
+        vm.stopPrank();
+        
+        gasBefore = gasleft();
+        nexusSettler.processPIPath(rootHash, keccak256(abi.encode(rootHash, "source")), path);
+        uint256 gasSettlerMulti = gasBefore - gasleft();
+        
+        emit log("=== Multi-Transfer Comparison ===");
+        emit log_named_uint("Transfers", numTransfers);
+        emit log_named_uint("Direct total", gasDirectMulti);
+        emit log_named_uint("Settler total", gasSettlerMulti);
+        emit log_named_uint("Direct per tx", gasDirectMulti / numTransfers);
+        emit log_named_uint("Settler per tx", gasSettlerMulti / numTransfers);
+    }
+}
