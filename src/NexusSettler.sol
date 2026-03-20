@@ -233,18 +233,19 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
                 break;
             }
             
-            // Find next node by hash (linear search)
-            bool found = false;
-            for (uint256 i = 0; i < path.length; i++) {
-                if (keccak256(abi.encode(path[i])) == node.next) {
-                    currentIdx = i;
-                    found = true;
+            // O(1) hash verification: assume nodes are in execution order
+            // Check if there's a next node in the array
+            if (currentIdx + 1 < path.length) {
+                // Verify hash of next node matches node.next
+                if (keccak256(abi.encode(path[currentIdx + 1])) == node.next) {
+                    currentIdx = currentIdx + 1;  // O(1) - just increment!
+                } else {
+                    // Hash mismatch - partial execution
+                    isComplete = false;
                     break;
                 }
-            }
-            
-            if (!found) {
-                // Next node not in path - partial execution, allow resuming
+            } else {
+                // No more nodes in array but next pointer is non-zero
                 isComplete = false;
                 break;
             }

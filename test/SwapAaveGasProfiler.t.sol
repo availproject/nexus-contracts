@@ -96,12 +96,7 @@ contract MockAavePool {
     }
 
     // Aave V3 supply function signature
-    function supply(
-        address asset,
-        uint256 amount,
-        address onBehalfOf,
-        uint16 referralCode
-    ) external {
+    function supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode) external {
         _supply(asset, amount, onBehalfOf);
     }
 
@@ -155,12 +150,7 @@ contract DirectSwapAaveExecutor {
         IERC20(tokenIn).approve(address(SWAP_ROUTER), swapAmount);
 
         // Execute swap - output tokens go to this contract
-        uint256 swappedAmount = SWAP_ROUTER.executeSwap(
-            tokenIn,
-            tokenOut,
-            swapAmount,
-            minAmountOut
-        );
+        uint256 swappedAmount = SWAP_ROUTER.executeSwap(tokenIn, tokenOut, swapAmount, minAmountOut);
 
         // Approve Aave pool
         IERC20(tokenOut).approve(address(AAVE_POOL), depositAmount);
@@ -214,10 +204,7 @@ contract SwapAaveGasProfiler is Test {
         mockAavePool = new MockAavePool();
 
         // Deploy DirectSwapAaveExecutor
-        directSwapAaveExecutor = new DirectSwapAaveExecutor(
-            address(mockV4SwapRouter),
-            address(mockAavePool)
-        );
+        directSwapAaveExecutor = new DirectSwapAaveExecutor(address(mockV4SwapRouter), address(mockAavePool));
 
         // Deploy test tokens (MUST be before setting aToken mapping)
         tokenA = new MockERC20("Token A", "TKA");
@@ -309,12 +296,12 @@ contract SwapAaveGasProfiler is Test {
         uint256 gasStart = gasleft();
 
         directSwapAaveExecutor.execute(
-            address(tokenA),            // tokenIn
-            address(tokenB),             // tokenOut
-            SWAP_AMOUNT_IN,              // swapAmount
-            DEPOSIT_AMOUNT,              // depositAmount
-            fillerDirect,                // beneficiary (receives aTokens)
-            SWAP_MIN_AMOUNT_OUT          // minAmountOut (slippage protection)
+            address(tokenA), // tokenIn
+            address(tokenB), // tokenOut
+            SWAP_AMOUNT_IN, // swapAmount
+            DEPOSIT_AMOUNT, // depositAmount
+            fillerDirect, // beneficiary (receives aTokens)
+            SWAP_MIN_AMOUNT_OUT // minAmountOut (slippage protection)
         );
 
         uint256 gasUsed = gasStart - gasleft();
@@ -334,5 +321,737 @@ contract SwapAaveGasProfiler is Test {
         // 8. Verify swap happened - filler should have less tokenA
         uint256 fillerTokenA = tokenA.balanceOf(fillerDirect);
         assertEq(fillerTokenA, INITIAL_BALANCE - SWAP_AMOUNT_IN, "Filler should have less tokenA after swap");
+    }
+
+    // ============================================================================
+    // DAG Graph Gas Profile Tests
+    // ============================================================================
+
+    /**
+     * @notice Compute EIP-712 digest for testing
+     */
+    function _computeDigestDAG(bytes32 structHash) internal view returns (bytes32) {
+        bytes32 DOMAIN_SEPARATOR = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes("NexusSettler")),
+                keccak256(bytes("2")),
+                block.chainid,
+                address(nexusSettler)
+            )
+        );
+
+        return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
+    }
+
+    /**
+     * @notice Profile gas for DAG Graph approach: swap + deposit via NexusSettler
+     *         This measures gas cost using createPI + processPIPath with connected nodes
+     */
+    function testGasProfile_DAG_SwapDepositConnected() public {
+        // 1. Create fresh filler with NexusSettler approvals
+        address fillerDag = makeAddr("filler_dag");
+        uint256 fillerDagPrivateKey = 0x123456789abcdef;
+
+        // Mint tokens to filler
+        tokenA.mint(fillerDag, INITIAL_BALANCE);
+
+        // Setup approvals: filler approves NexusSettler to pull tokens
+        vm.startPrank(fillerDag);
+        tokenA.approve(address(nexusSettler), type(uint256).max);
+        tokenB.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+
+        // 2. Create rootHash, signature, nonce for createPI
+        bytes32 s = keccak256("source");
+        bytes32 d = keccak256("destination");
+        bytes32 o = keccak256("offchain");
+        uint256 nonce = 1;
+        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
+
+        // Generate EIP-712 signature
+        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
+        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
+        bytes32 digest = _computeDigestDAG(structHash);
+        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s_sig, v);
+
+        // 3. Call createPI
+        nexusSettler.createPI(rootHash, signature, nonce, s, d, o);
+
+        // 4. Create IntendNode[] path with 4 connected nodes:
+        // Node 0: Pull tokens from filler to NexusSettler
+        // Node 1: Approve pool manager to spend NexusSettler's tokens
+        // Node 2: Swap tokenA for tokenB
+        // Node 3: Deposit tokenB to Aave
+        INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](4);
+
+        // Node 3: Deposit to Aave (end of path)
+        path[3] = INexusSettler.IntendNode({
+            next: bytes32(0), // End of path
+            target: address(mockAavePool),
+            data: abi.encodeWithSignature(
+                "supply(address,uint256,address,uint16)", address(tokenB), DEPOSIT_AMOUNT, fillerDag, 0
+            )
+        });
+
+        // Node 2: Swap tokenA for tokenB via pool manager (points to node 3)
+        PoolKey memory swapKey = PoolKey({
+            currency0: Currency.wrap(address(tokenA) < address(tokenB) ? address(tokenA) : address(tokenB)),
+            currency1: Currency.wrap(address(tokenA) < address(tokenB) ? address(tokenB) : address(tokenA)),
+            fee: SWAP_FEE,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        bool zeroForOne = address(tokenA) < address(tokenB);
+
+        path[2] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[3])),
+            target: address(mockPoolManager),
+            data: abi.encodeWithSignature(
+                "swap((address,address,uint24,int24,address),bool,uint256,uint256)",
+                swapKey,
+                zeroForOne,
+                SWAP_AMOUNT_IN,
+                SWAP_MIN_AMOUNT_OUT
+            )
+        });
+
+        // Node 1: Approve pool manager to spend NexusSettler's tokens (points to node 2)
+        path[1] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[2])),
+            target: address(tokenA),
+            data: abi.encodeWithSignature("approve(address,uint256)", address(mockPoolManager), SWAP_AMOUNT_IN)
+        });
+
+        // Node 0: Pull tokens from filler to NexusSettler (points to node 1)
+        path[0] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[1])),
+            target: address(tokenA),
+            data: abi.encodeWithSignature(
+                "transferFrom(address,address,uint256)", fillerDag, address(nexusSettler), SWAP_AMOUNT_IN
+            )
+        });
+
+        // 5. Measure gas and execute
+        bytes32 targetNodeHash = keccak256(abi.encode(rootHash, "destination"));
+
+        vm.prank(fillerDag);
+        uint256 gasStart = gasleft();
+        nexusSettler.processPIPath(rootHash, targetNodeHash, path);
+        uint256 gasUsed = gasStart - gasleft();
+
+        // 6. Log results
+        console2.log("=== DAG Graph Gas ===");
+        console2.log("Gas used:", gasUsed);
+
+        // 7. Verify state
+        bytes32 completionKey = keccak256(abi.encode(rootHash, targetNodeHash));
+        assertTrue(nexusSettler.completed(completionKey), "Path should be completed");
+
+        // Verify filler has aTokens
+        uint256 aTokenBalance = mockAToken.balanceOf(fillerDag);
+        assertEq(aTokenBalance, DEPOSIT_AMOUNT, "Filler should have received aTokens");
+
+        // Verify pool received tokenB
+        uint256 poolTokenBBalance = mockAavePool.supplied(fillerDag, address(tokenB));
+        assertEq(poolTokenBBalance, DEPOSIT_AMOUNT, "Pool should have received tokenB deposit");
+    }
+
+    // ============================================================================
+    // Gas Comparison Tests
+    // ============================================================================
+
+    /**
+     * @notice Compare gas costs between Direct Sequential and DAG Graph approaches
+     *         using vm.snapshot() to ensure fair comparison with clean state
+     */
+    function testGasProfile_Comparison() public {
+        // Use vm.snapshot() for fair comparison
+        uint256 state = vm.snapshot();
+
+        // ============ DIRECT SEQUENTIAL ============
+        address fillerDirect = makeAddr("filler_comparison_direct");
+
+        // Setup fresh filler
+        tokenA.mint(fillerDirect, INITIAL_BALANCE);
+        vm.startPrank(fillerDirect);
+        tokenA.approve(address(directSwapAaveExecutor), type(uint256).max);
+        vm.stopPrank();
+
+        // Measure gas
+        vm.prank(fillerDirect);
+        uint256 gasStart = gasleft();
+        directSwapAaveExecutor.execute(
+            address(tokenA), address(tokenB), SWAP_AMOUNT_IN, DEPOSIT_AMOUNT, fillerDirect, SWAP_MIN_AMOUNT_OUT
+        );
+        uint256 gasDirect = gasStart - gasleft();
+
+        // ============ DAG GRAPH ============
+        // Revert to clean state
+        vm.revertTo(state);
+
+        address fillerDag = makeAddr("filler_comparison_dag");
+        uint256 fillerDagPrivateKey = 0xabcdef123456789;
+
+        // Setup fresh filler
+        tokenA.mint(fillerDag, INITIAL_BALANCE);
+        vm.startPrank(fillerDag);
+        tokenA.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+
+        // Create intent
+        bytes32 s = keccak256("source");
+        bytes32 d = keccak256("destination");
+        bytes32 o = keccak256("offchain");
+        uint256 nonce = 1;
+        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
+
+        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
+        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
+        bytes32 digest = _computeDigestDAG(structHash);
+        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s_sig, v);
+
+        nexusSettler.createPI(rootHash, signature, nonce, s, d, o);
+
+        // Create 4-node path (same as DAG test)
+        INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](4);
+
+        // Node 3: Deposit
+        path[3] = INexusSettler.IntendNode({
+            next: bytes32(0),
+            target: address(mockAavePool),
+            data: abi.encodeWithSignature(
+                "supply(address,uint256,address,uint16)", address(tokenB), DEPOSIT_AMOUNT, fillerDag, 0
+            )
+        });
+
+        // Node 2: Swap
+        PoolKey memory swapKey = PoolKey({
+            currency0: Currency.wrap(address(tokenA) < address(tokenB) ? address(tokenA) : address(tokenB)),
+            currency1: Currency.wrap(address(tokenA) < address(tokenB) ? address(tokenB) : address(tokenA)),
+            fee: SWAP_FEE,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        bool zeroForOne = address(tokenA) < address(tokenB);
+
+        path[2] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[3])),
+            target: address(mockPoolManager),
+            data: abi.encodeWithSignature(
+                "swap((address,address,uint24,int24,address),bool,uint256,uint256)",
+                swapKey,
+                zeroForOne,
+                SWAP_AMOUNT_IN,
+                SWAP_MIN_AMOUNT_OUT
+            )
+        });
+
+        // Node 1: Approve
+        path[1] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[2])),
+            target: address(tokenA),
+            data: abi.encodeWithSignature("approve(address,uint256)", address(mockPoolManager), SWAP_AMOUNT_IN)
+        });
+
+        // Node 0: Pull tokens
+        path[0] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[1])),
+            target: address(tokenA),
+            data: abi.encodeWithSignature(
+                "transferFrom(address,address,uint256)", fillerDag, address(nexusSettler), SWAP_AMOUNT_IN
+            )
+        });
+
+        // Measure gas
+        bytes32 targetNodeHash = keccak256(abi.encode(rootHash, "destination"));
+
+        vm.prank(fillerDag);
+        uint256 gasStartDag = gasleft();
+        nexusSettler.processPIPath(rootHash, targetNodeHash, path);
+        uint256 gasDAG = gasStartDag - gasleft();
+
+        // ============ COMPARISON OUTPUT ============
+        console2.log("\n=== Gas Comparison (Swap + Aave Deposit) ===");
+        console2.log("Direct Sequential gas:", gasDirect);
+        console2.log("DAG Graph gas:", gasDAG);
+        console2.log("Difference (DAG overhead):", gasDAG - gasDirect);
+        console2.log("Overhead %:", ((gasDAG - gasDirect) * 100) / gasDirect, "%");
+
+        // Verify DAG gas is higher (expected overhead)
+        assertGt(gasDAG, gasDirect, "DAG should have overhead vs Direct");
+    }
+
+    // ============================================================================
+    // Deposit Only Flow Tests (DAG vs Direct)
+    // ============================================================================
+
+    /**
+     * @notice Profile gas for direct Aave deposit only (no swap)
+     *         Baseline measurement for deposit-only flow
+     */
+    function testGasProfile_DirectAaveDepositOnly() public {
+        // 1. Create fresh filler
+        address fillerDirect = makeAddr("filler_direct_deposit_only");
+
+        // 2. Mint tokenB directly to filler (skip swap)
+        tokenB.mint(fillerDirect, INITIAL_BALANCE);
+
+        // 3. Setup approvals
+        vm.startPrank(fillerDirect);
+        tokenB.approve(address(mockAavePool), type(uint256).max);
+        vm.stopPrank();
+
+        // 4. Measure gas for direct deposit only
+        vm.prank(fillerDirect);
+        uint256 gasStart = gasleft();
+
+        mockAavePool.supply(address(tokenB), DEPOSIT_AMOUNT, fillerDirect, 0);
+
+        uint256 gasUsed = gasStart - gasleft();
+
+        // 5. Log results
+        console2.log("=== Direct Aave Deposit Only Gas ===");
+        console2.log("Gas used:", gasUsed);
+
+        // 6. Verify state
+        uint256 aTokenBalance = mockAToken.balanceOf(fillerDirect);
+        assertEq(aTokenBalance, DEPOSIT_AMOUNT, "Filler should have received aTokens");
+
+        uint256 poolTokenBBalance = mockAavePool.supplied(fillerDirect, address(tokenB));
+        assertEq(poolTokenBBalance, DEPOSIT_AMOUNT, "Pool should have received tokenB deposit");
+    }
+
+    /**
+     * @notice Profile gas for DAG Graph: deposit only (no swap)
+     *         This tests DAG overhead for a single deposit operation
+     */
+    function testGasProfile_DAG_DepositOnly() public {
+        // 1. Create fresh filler with NexusSettler approvals
+        address fillerDag = makeAddr("filler_dag_deposit_only");
+        uint256 fillerDagPrivateKey = 0xfedcba9876543210;
+
+        // Mint tokenB to filler (no swap needed)
+        tokenB.mint(fillerDag, INITIAL_BALANCE);
+
+        // Setup approvals
+        vm.startPrank(fillerDag);
+        tokenB.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+
+        // 2. Create rootHash, signature, nonce for createPI
+        bytes32 s = keccak256("source_deposit_only");
+        bytes32 d = keccak256("destination_deposit_only");
+        bytes32 o = keccak256("offchain_deposit_only");
+        uint256 nonce = 2;
+        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
+
+        // Generate EIP-712 signature
+        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
+        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
+        bytes32 digest = _computeDigestDAG(structHash);
+        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s_sig, v);
+
+        // 3. Call createPI
+        nexusSettler.createPI(rootHash, signature, nonce, s, d, o);
+
+        // 4. Create IntendNode[] path with 2 connected nodes:
+        // Node 0: Pull tokenB from filler to NexusSettler
+        // Node 1: Deposit tokenB to Aave
+        INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](2);
+
+        // Node 1: Deposit to Aave (end of path)
+        path[1] = INexusSettler.IntendNode({
+            next: bytes32(0), // End of path
+            target: address(mockAavePool),
+            data: abi.encodeWithSignature(
+                "supply(address,uint256,address,uint16)", address(tokenB), DEPOSIT_AMOUNT, fillerDag, 0
+            )
+        });
+
+        // Node 0: Pull tokenB from filler to NexusSettler (points to node 1)
+        path[0] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[1])),
+            target: address(tokenB),
+            data: abi.encodeWithSignature(
+                "transferFrom(address,address,uint256)", fillerDag, address(nexusSettler), DEPOSIT_AMOUNT
+            )
+        });
+
+        // 5. Measure gas and execute
+        bytes32 targetNodeHash = keccak256(abi.encode(rootHash, "destination"));
+
+        vm.prank(fillerDag);
+        uint256 gasStart = gasleft();
+        nexusSettler.processPIPath(rootHash, targetNodeHash, path);
+        uint256 gasUsed = gasStart - gasleft();
+
+        // 6. Log results
+        console2.log("=== DAG Graph Gas (Deposit Only) ===");
+        console2.log("Gas used:", gasUsed);
+
+        // 7. Verify state
+        bytes32 completionKey = keccak256(abi.encode(rootHash, targetNodeHash));
+        assertTrue(nexusSettler.completed(completionKey), "Path should be completed");
+
+        // Verify filler has aTokens
+        uint256 aTokenBalance = mockAToken.balanceOf(fillerDag);
+        assertEq(aTokenBalance, DEPOSIT_AMOUNT, "Filler should have received aTokens");
+
+        // Verify pool received tokenB
+        uint256 poolTokenBBalance = mockAavePool.supplied(fillerDag, address(tokenB));
+        assertEq(poolTokenBBalance, DEPOSIT_AMOUNT, "Pool should have received tokenB deposit");
+    }
+
+    /**
+     * @notice Compare direct Aave deposit vs DAG deposit-only flow
+     *         Uses vm.snapshot() for fair comparison
+     */
+    function testGasProfile_Comparison_DepositOnly() public {
+        // Use vm.snapshot() for fair comparison
+        uint256 state = vm.snapshot();
+
+        // ============ DIRECT AAVE DEPOSIT ONLY ============
+        address fillerDirect = makeAddr("filler_comparison_direct_deposit");
+
+        // Setup fresh filler with tokenB
+        tokenB.mint(fillerDirect, INITIAL_BALANCE);
+        vm.startPrank(fillerDirect);
+        tokenB.approve(address(mockAavePool), type(uint256).max);
+        vm.stopPrank();
+
+        // Measure gas
+        vm.prank(fillerDirect);
+        uint256 gasStart = gasleft();
+        mockAavePool.supply(address(tokenB), DEPOSIT_AMOUNT, fillerDirect, 0);
+        uint256 gasDirect = gasStart - gasleft();
+
+        // ============ DAG DEPOSIT ONLY ============
+        // Revert to clean state
+        vm.revertTo(state);
+
+        address fillerDag = makeAddr("filler_comparison_dag_deposit");
+        uint256 fillerDagPrivateKey = 0xabcdef1234567890;
+
+        // Setup fresh filler with tokenB
+        tokenB.mint(fillerDag, INITIAL_BALANCE);
+        vm.startPrank(fillerDag);
+        tokenB.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+
+        // Create intent
+        bytes32 s = keccak256("source_comparison");
+        bytes32 d = keccak256("destination_comparison");
+        bytes32 o = keccak256("offchain_comparison");
+        uint256 nonce = 3;
+        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
+
+        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
+        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
+        bytes32 digest = _computeDigestDAG(structHash);
+        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s_sig, v);
+
+        nexusSettler.createPI(rootHash, signature, nonce, s, d, o);
+
+        // Create 2-node path (pull -> deposit)
+        INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](2);
+
+        // Node 1: Deposit
+        path[1] = INexusSettler.IntendNode({
+            next: bytes32(0),
+            target: address(mockAavePool),
+            data: abi.encodeWithSignature(
+                "supply(address,uint256,address,uint16)", address(tokenB), DEPOSIT_AMOUNT, fillerDag, 0
+            )
+        });
+
+        // Node 0: Pull tokens
+        path[0] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[1])),
+            target: address(tokenB),
+            data: abi.encodeWithSignature(
+                "transferFrom(address,address,uint256)", fillerDag, address(nexusSettler), DEPOSIT_AMOUNT
+            )
+        });
+
+        // Measure gas
+        bytes32 targetNodeHash = keccak256(abi.encode(rootHash, "destination"));
+
+        vm.prank(fillerDag);
+        uint256 gasStartDag = gasleft();
+        nexusSettler.processPIPath(rootHash, targetNodeHash, path);
+        uint256 gasDAG = gasStartDag - gasleft();
+
+        // ============ COMPARISON OUTPUT ============
+        console2.log("\n=== Gas Comparison (Deposit Only) ===");
+        console2.log("Direct Aave Deposit Only gas:", gasDirect);
+        console2.log("DAG (Deposit Only) gas:", gasDAG);
+        console2.log("Difference (DAG overhead):", gasDAG - gasDirect);
+        console2.log("Overhead %:", ((gasDAG - gasDirect) * 100) / gasDirect, "%");
+
+        // Verify DAG gas is higher (expected overhead)
+        assertGt(gasDAG, gasDirect, "DAG should have overhead vs Direct");
+    }
+
+    /**
+     * @notice Profile gas for DAG Graph: deposit -> swap -> deposit flow
+     *         This tests a more complex DAG with 3 operations
+     */
+    function testGasProfile_DAG_DepositSwapDeposit() public {
+        // 1. Create fresh filler with NexusSettler approvals
+        address fillerDag = makeAddr("filler_dag_deposit_swap_deposit");
+        uint256 fillerDagPrivateKey = 0xfedcba9876543210;
+
+        // Mint tokenA to filler (will be swapped to tokenB, then deposited)
+        tokenA.mint(fillerDag, INITIAL_BALANCE);
+
+        // Setup approvals
+        vm.startPrank(fillerDag);
+        tokenA.approve(address(nexusSettler), type(uint256).max);
+        tokenB.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+
+        // 2. Create rootHash, signature, nonce for createPI
+        bytes32 s = keccak256("source_deposit_swap");
+        bytes32 d = keccak256("destination_deposit_swap");
+        bytes32 o = keccak256("offchain_deposit_swap");
+        uint256 nonce = 2;
+        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
+
+        // Generate EIP-712 signature
+        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
+        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
+        bytes32 digest = _computeDigestDAG(structHash);
+        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s_sig, v);
+
+        // 3. Call createPI
+        nexusSettler.createPI(rootHash, signature, nonce, s, d, o);
+
+        // 4. Create IntendNode[] path with 5 connected nodes:
+        // Node 0: Pull tokenA from filler to NexusSettler
+        // Node 1: Approve pool manager for swap
+        // Node 2: Swap tokenA for tokenB
+        // Node 3: Approve Aave pool for deposit
+        // Node 4: Deposit tokenB to Aave
+        INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](5);
+
+        // Node 4: Deposit to Aave (end of path)
+        path[4] = INexusSettler.IntendNode({
+            next: bytes32(0), // End of path
+            target: address(mockAavePool),
+            data: abi.encodeWithSignature(
+                "supply(address,uint256,address,uint16)", address(tokenB), DEPOSIT_AMOUNT, fillerDag, 0
+            )
+        });
+
+        // Node 3: Approve Aave pool to spend tokenB (points to node 4)
+        path[3] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[4])),
+            target: address(tokenB),
+            data: abi.encodeWithSignature("approve(address,uint256)", address(mockAavePool), DEPOSIT_AMOUNT)
+        });
+
+        // Node 2: Swap tokenA for tokenB via pool manager (points to node 3)
+        PoolKey memory swapKey = PoolKey({
+            currency0: Currency.wrap(address(tokenA) < address(tokenB) ? address(tokenA) : address(tokenB)),
+            currency1: Currency.wrap(address(tokenA) < address(tokenB) ? address(tokenB) : address(tokenA)),
+            fee: SWAP_FEE,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        bool zeroForOne = address(tokenA) < address(tokenB);
+
+        path[2] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[3])),
+            target: address(mockPoolManager),
+            data: abi.encodeWithSignature(
+                "swap((address,address,uint24,int24,address),bool,uint256,uint256)",
+                swapKey,
+                zeroForOne,
+                SWAP_AMOUNT_IN,
+                SWAP_MIN_AMOUNT_OUT
+            )
+        });
+
+        // Node 1: Approve pool manager to spend tokenA (points to node 2)
+        path[1] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[2])),
+            target: address(tokenA),
+            data: abi.encodeWithSignature("approve(address,uint256)", address(mockPoolManager), SWAP_AMOUNT_IN)
+        });
+
+        // Node 0: Pull tokenA from filler to NexusSettler (points to node 1)
+        path[0] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[1])),
+            target: address(tokenA),
+            data: abi.encodeWithSignature(
+                "transferFrom(address,address,uint256)", fillerDag, address(nexusSettler), SWAP_AMOUNT_IN
+            )
+        });
+
+        // 5. Measure gas and execute
+        bytes32 targetNodeHash = keccak256(abi.encode(rootHash, "destination"));
+
+        vm.prank(fillerDag);
+        uint256 gasStart = gasleft();
+        nexusSettler.processPIPath(rootHash, targetNodeHash, path);
+        uint256 gasUsed = gasStart - gasleft();
+
+        // 6. Log results
+        console2.log("=== DAG Graph Gas (Deposit -> Swap -> Deposit) ===");
+        console2.log("Gas used:", gasUsed);
+
+        // 7. Verify state
+        bytes32 completionKey = keccak256(abi.encode(rootHash, targetNodeHash));
+        assertTrue(nexusSettler.completed(completionKey), "Path should be completed");
+
+        // Verify filler has aTokens
+        uint256 aTokenBalance = mockAToken.balanceOf(fillerDag);
+        assertEq(aTokenBalance, DEPOSIT_AMOUNT, "Filler should have received aTokens");
+
+        // Verify pool received tokenB
+        uint256 poolTokenBBalance = mockAavePool.supplied(fillerDag, address(tokenB));
+        assertEq(poolTokenBBalance, DEPOSIT_AMOUNT, "Pool should have received tokenB deposit");
+    }
+
+    /**
+     * @notice Compare direct swap+deposit vs DAG pull+swap+deposit flow
+     *         FAIR COMPARISON: Both sides perform swap + deposit operations
+     *         Uses vm.snapshot() for fair comparison
+     */
+    function testGasProfile_Comparison_DepositSwapDeposit() public {
+        // Use vm.snapshot() for fair comparison
+        uint256 state = vm.snapshot();
+
+        // ============ DIRECT SWAP + DEPOSIT ============
+        address fillerDirect = makeAddr("filler_comparison_direct_swap_deposit");
+
+        // Setup fresh filler with tokenA (will swap to tokenB, then deposit)
+        tokenA.mint(fillerDirect, INITIAL_BALANCE);
+        vm.startPrank(fillerDirect);
+        tokenA.approve(address(directSwapAaveExecutor), type(uint256).max);
+        vm.stopPrank();
+
+        // Measure gas for direct swap + deposit
+        vm.prank(fillerDirect);
+        uint256 gasStart = gasleft();
+        directSwapAaveExecutor.execute(
+            address(tokenA), // tokenIn
+            address(tokenB), // tokenOut
+            SWAP_AMOUNT_IN, // swapAmount
+            DEPOSIT_AMOUNT, // depositAmount
+            fillerDirect, // beneficiary
+            SWAP_MIN_AMOUNT_OUT // minAmountOut
+        );
+        uint256 gasDirect = gasStart - gasleft();
+
+        // ============ DAG PULL + SWAP + DEPOSIT ============
+        // Revert to clean state
+        vm.revertTo(state);
+
+        address fillerDag = makeAddr("filler_comparison_dag_pull_swap_deposit");
+        uint256 fillerDagPrivateKey = 0xabcdef1234567890;
+
+        // Setup fresh filler with tokenA
+        tokenA.mint(fillerDag, INITIAL_BALANCE);
+        vm.startPrank(fillerDag);
+        tokenA.approve(address(nexusSettler), type(uint256).max);
+        tokenB.approve(address(nexusSettler), type(uint256).max);
+        vm.stopPrank();
+
+        // Create intent
+        bytes32 s = keccak256("source_comparison");
+        bytes32 d = keccak256("destination_comparison");
+        bytes32 o = keccak256("offchain_comparison");
+        uint256 nonce = 3;
+        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
+
+        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
+        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
+        bytes32 digest = _computeDigestDAG(structHash);
+        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s_sig, v);
+
+        nexusSettler.createPI(rootHash, signature, nonce, s, d, o);
+
+        // Create 5-node path (pull -> approve -> swap -> approve -> deposit)
+        INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](5);
+
+        // Node 4: Deposit
+        path[4] = INexusSettler.IntendNode({
+            next: bytes32(0),
+            target: address(mockAavePool),
+            data: abi.encodeWithSignature(
+                "supply(address,uint256,address,uint16)", address(tokenB), DEPOSIT_AMOUNT, fillerDag, 0
+            )
+        });
+
+        // Node 3: Approve Aave
+        path[3] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[4])),
+            target: address(tokenB),
+            data: abi.encodeWithSignature("approve(address,uint256)", address(mockAavePool), DEPOSIT_AMOUNT)
+        });
+
+        // Node 2: Swap
+        PoolKey memory swapKey = PoolKey({
+            currency0: Currency.wrap(address(tokenA) < address(tokenB) ? address(tokenA) : address(tokenB)),
+            currency1: Currency.wrap(address(tokenA) < address(tokenB) ? address(tokenB) : address(tokenA)),
+            fee: SWAP_FEE,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        bool zeroForOne = address(tokenA) < address(tokenB);
+
+        path[2] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[3])),
+            target: address(mockPoolManager),
+            data: abi.encodeWithSignature(
+                "swap((address,address,uint24,int24,address),bool,uint256,uint256)",
+                swapKey,
+                zeroForOne,
+                SWAP_AMOUNT_IN,
+                SWAP_MIN_AMOUNT_OUT
+            )
+        });
+
+        // Node 1: Approve pool manager
+        path[1] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[2])),
+            target: address(tokenA),
+            data: abi.encodeWithSignature("approve(address,uint256)", address(mockPoolManager), SWAP_AMOUNT_IN)
+        });
+
+        // Node 0: Pull tokens
+        path[0] = INexusSettler.IntendNode({
+            next: keccak256(abi.encode(path[1])),
+            target: address(tokenA),
+            data: abi.encodeWithSignature(
+                "transferFrom(address,address,uint256)", fillerDag, address(nexusSettler), SWAP_AMOUNT_IN
+            )
+        });
+
+        // Measure gas
+        bytes32 targetNodeHash = keccak256(abi.encode(rootHash, "destination"));
+
+        vm.prank(fillerDag);
+        uint256 gasStartDag = gasleft();
+        nexusSettler.processPIPath(rootHash, targetNodeHash, path);
+        uint256 gasDAG = gasStartDag - gasleft();
+
+        // ============ COMPARISON OUTPUT ============
+        console2.log("\n=== Gas Comparison (Swap + Deposit - FAIR) ===");
+        console2.log("Direct (Swap + Deposit) gas:", gasDirect);
+        console2.log("DAG (Pull + Swap + Deposit) gas:", gasDAG);
+        console2.log("Difference (DAG overhead):", gasDAG - gasDirect);
+        console2.log("Overhead %:", ((gasDAG - gasDirect) * 100) / gasDirect, "%");
+
+        // Verify DAG gas is higher (expected overhead)
+        assertGt(gasDAG, gasDirect, "DAG should have overhead vs Direct");
     }
 }
