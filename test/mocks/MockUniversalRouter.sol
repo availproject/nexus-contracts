@@ -162,10 +162,9 @@ contract MockUniversalRouter {
         console2.log("actualAmountIn:", actualAmountIn);
         console2.log("About to transfer from PERMIT2");
 
-        // Transfer input tokens from Permit2 (which should hold tokens after UniswapV4Router
-        // transfers from sender to itself and sets up PERMIT2 approvals)
+        // Transfer input tokens from caller (direct approval model for mock)
         IERC20(settleToken).safeTransferFrom(
-            PERMIT2,
+            msg.sender,
             address(this),
             actualAmountIn
         );
