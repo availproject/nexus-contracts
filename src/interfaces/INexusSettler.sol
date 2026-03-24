@@ -80,6 +80,13 @@ interface INexusSettler {
     error CycleDetected();
 
     /**
+     * @notice Chain ID in target data doesn't match current chain
+     * @param expected The expected chain ID (current chain)
+     * @param actual The actual chain ID found in the data
+     */
+    error InvalidChainId(uint16 expected, uint16 actual);
+
+    /**
      * @notice Emitted when a new Path Intent is created
      * @param rootHash The root hash of the created intent
      * @param signer The address that signed the intent
