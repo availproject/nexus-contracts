@@ -86,20 +86,6 @@ interface INexusSettler {
     event PICreated(bytes32 indexed rootHash, address indexed signer);
 
     /**
-     * @notice Node executed
-     * @param nodeHash Hash of executed node
-     * @param level Depth in path (0-indexed)
-     */
-    event IntendNodeExec(bytes32 indexed nodeHash, uint256 level);
-
-    /**
-     * @notice Node skipped (already processed)
-     * @param nodeHash Hash of skipped node
-     * @param level Depth in path (0-indexed)
-     */
-    event IntendNodeSkipped(bytes32 indexed nodeHash, uint256 level);
-
-    /**
      * @notice Path processed (complete or partial)
      * @param targetNodeHash Entry point hash
      * @param lastNodeHash Final node executed
@@ -144,6 +130,6 @@ interface INexusSettler {
     /// Returns true if (rootHash, targetNodeHash) completed
     function completed(bytes32 completionKey) external view returns (bool);
 
-    /// Returns true if IntendNode was processed
-    function processedNodes(bytes32 nodeKey) external view returns (bool);
+    /// Returns bitmap of processed node indices for a completion key
+    function processedBitmap(bytes32 completionKey) external view returns (uint256);
 }
