@@ -17,11 +17,7 @@ contract MockV4SwapRouter {
     MockPoolManager public immutable POOL_MANAGER;
 
     event DirectSwapExecuted(
-        address indexed sender,
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn,
-        uint256 amountOut
+        address indexed sender, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut
     );
 
     constructor(address poolManager) {
@@ -34,18 +30,12 @@ contract MockV4SwapRouter {
     /// @param amountIn Input amount
     /// @param minAmountOut Minimum output amount
     /// @return amountOut Output amount
-    function executeSwap(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn,
-        uint256 minAmountOut
-    ) external returns (uint256 amountOut) {
+    function executeSwap(address tokenIn, address tokenOut, uint256 amountIn, uint256 minAmountOut)
+        external
+        returns (uint256 amountOut)
+    {
         // Transfer tokens from caller
-        IERC20(tokenIn).safeTransferFrom(
-            msg.sender,
-            address(this),
-            amountIn
-        );
+        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
 
         // Approve pool manager
         IERC20(tokenIn).forceApprove(address(POOL_MANAGER), amountIn);
@@ -64,13 +54,7 @@ contract MockV4SwapRouter {
         // Transfer output to caller
         IERC20(tokenOut).safeTransfer(msg.sender, amountOut);
 
-        emit DirectSwapExecuted(
-            msg.sender,
-            tokenIn,
-            tokenOut,
-            amountIn,
-            amountOut
-        );
+        emit DirectSwapExecuted(msg.sender, tokenIn, tokenOut, amountIn, amountOut);
 
         return amountOut;
     }
@@ -81,25 +65,15 @@ contract MockV4SwapRouter {
     /// @param amountIn Input amount
     /// @param minAmountOut Minimum output amount
     /// @return amountOut Output amount
-    function executeSwapWithKey(
-        PoolKey calldata key,
-        bool zeroForOne,
-        uint256 amountIn,
-        uint256 minAmountOut
-    ) external returns (uint256 amountOut) {
-        address tokenIn = zeroForOne
-            ? Currency.unwrap(key.currency0)
-            : Currency.unwrap(key.currency1);
-        address tokenOut = zeroForOne
-            ? Currency.unwrap(key.currency1)
-            : Currency.unwrap(key.currency0);
+    function executeSwapWithKey(PoolKey calldata key, bool zeroForOne, uint256 amountIn, uint256 minAmountOut)
+        external
+        returns (uint256 amountOut)
+    {
+        address tokenIn = zeroForOne ? Currency.unwrap(key.currency0) : Currency.unwrap(key.currency1);
+        address tokenOut = zeroForOne ? Currency.unwrap(key.currency1) : Currency.unwrap(key.currency0);
 
         // Transfer tokens from caller
-        IERC20(tokenIn).safeTransferFrom(
-            msg.sender,
-            address(this),
-            amountIn
-        );
+        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
 
         // Approve pool manager
         IERC20(tokenIn).forceApprove(address(POOL_MANAGER), amountIn);
@@ -110,13 +84,7 @@ contract MockV4SwapRouter {
         // Transfer output to caller
         IERC20(tokenOut).safeTransfer(msg.sender, amountOut);
 
-        emit DirectSwapExecuted(
-            msg.sender,
-            tokenIn,
-            tokenOut,
-            amountIn,
-            amountOut
-        );
+        emit DirectSwapExecuted(msg.sender, tokenIn, tokenOut, amountIn, amountOut);
 
         return amountOut;
     }
@@ -125,10 +93,7 @@ contract MockV4SwapRouter {
     /// @param tokenA First token
     /// @param tokenB Second token
     /// @return key Pool key with sorted currencies
-    function _createPoolKey(
-        address tokenA,
-        address tokenB
-    ) internal pure returns (PoolKey memory key) {
+    function _createPoolKey(address tokenA, address tokenB) internal pure returns (PoolKey memory key) {
         // Sort currencies (currency0 < currency1)
         if (tokenA < tokenB) {
             key.currency0 = Currency.wrap(tokenA);

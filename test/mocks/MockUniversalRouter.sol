@@ -30,11 +30,7 @@ contract MockUniversalRouter {
 
     event Execute(bytes commands, uint256 deadline);
     event V4SwapExecuted(
-        address indexed sender,
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn,
-        uint256 amountOut
+        address indexed sender, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut
     );
 
     constructor(address poolManager, address permit2) {
@@ -46,11 +42,7 @@ contract MockUniversalRouter {
     /// @param commands Encoded command bytes
     /// @param inputs Array of encoded inputs for each command
     /// @param deadline Transaction deadline
-    function execute(
-        bytes calldata commands,
-        bytes[] calldata inputs,
-        uint256 deadline
-    ) external {
+    function execute(bytes calldata commands, bytes[] calldata inputs, uint256 deadline) external {
         require(block.timestamp <= deadline, "Transaction expired");
 
         emit Execute(commands, deadline);
@@ -59,7 +51,7 @@ contract MockUniversalRouter {
         console2.log("Commands length:", commands.length);
         console2.log("Inputs length:", inputs.length);
 
-        for (uint256 i = 0; i < commands.length; ) {
+        for (uint256 i = 0; i < commands.length;) {
             uint8 command = uint8(commands[i]);
             console2.log("Command:", command);
 
@@ -80,13 +72,10 @@ contract MockUniversalRouter {
     /// @param input Encoded swap parameters
     function _executeV4Swap(bytes calldata input) internal {
         console2.log("_executeV4Swap called, input length:", input.length);
-        
+
         // Decode actions and params from input
         // Format: abi.encode(actions, params)
-        (
-            bytes memory actions,
-            bytes[] memory params
-        ) = abi.decode(input, (bytes, bytes[]));
+        (bytes memory actions, bytes[] memory params) = abi.decode(input, (bytes, bytes[]));
 
         console2.log("Decoded actions length:", actions.length);
         console2.log("Decoded params length:", params.length);
@@ -106,15 +95,10 @@ contract MockUniversalRouter {
         uint256 amountOutMinimum;
         uint256 amountOut;
         uint256 amountInMaximum;
-        
+
         // Pass full params array to access params[1] and params[2]
         try this.decodeParams(params, exactOut) returns (
-            PoolKey memory k,
-            bool zfo,
-            uint256 amtIn,
-            uint256 amtOutMin,
-            uint256 amtOut,
-            uint256 amtInMax
+            PoolKey memory k, bool zfo, uint256 amtIn, uint256 amtOutMin, uint256 amtOut, uint256 amtInMax
         ) {
             key = k;
             zeroForOne = zfo;
@@ -135,21 +119,15 @@ contract MockUniversalRouter {
 
         // Debug: print first few bytes of params
         bytes memory first4 = new bytes(4);
-        for (uint i = 0; i < 4 && i < params[0].length; i++) {
+        for (uint256 i = 0; i < 4 && i < params[0].length; i++) {
             first4[i] = params[0][i];
         }
         console2.log("First 4 bytes of params:", uint32(bytes4(first4)));
         console2.log("Params length:", params[0].length);
 
         // Get settle and take params
-        (address settleToken, uint256 settleAmount) = abi.decode(
-            params[1],
-            (address, uint256)
-        );
-        (address takeToken, uint256 takeAmount) = abi.decode(
-            params[2],
-            (address, uint256)
-        );
+        (address settleToken, uint256 settleAmount) = abi.decode(params[1], (address, uint256));
+        (address takeToken, uint256 takeAmount) = abi.decode(params[2], (address, uint256));
 
         console2.log("settleToken:", settleToken);
         console2.log("takeToken:", takeToken);
@@ -163,38 +141,20 @@ contract MockUniversalRouter {
         console2.log("About to transfer from PERMIT2");
 
         // Transfer input tokens from caller (direct approval model for mock)
-        IERC20(settleToken).safeTransferFrom(
-            msg.sender,
-            address(this),
-            actualAmountIn
-        );
+        IERC20(settleToken).safeTransferFrom(msg.sender, address(this), actualAmountIn);
 
         console2.log("Transfer from PERMIT2 successful");
 
         // Approve pool manager
-        IERC20(settleToken).forceApprove(
-            address(POOL_MANAGER),
-            actualAmountIn
-        );
+        IERC20(settleToken).forceApprove(address(POOL_MANAGER), actualAmountIn);
 
         // Execute swap via pool manager
-        uint256 outputAmount = POOL_MANAGER.swap(
-            key,
-            zeroForOne,
-            actualAmountIn,
-            minAmountOut
-        );
+        uint256 outputAmount = POOL_MANAGER.swap(key, zeroForOne, actualAmountIn, minAmountOut);
 
         // Transfer output tokens to caller
         IERC20(takeToken).safeTransfer(msg.sender, outputAmount);
 
-        emit V4SwapExecuted(
-            msg.sender,
-            settleToken,
-            takeToken,
-            actualAmountIn,
-            outputAmount
-        );
+        emit V4SwapExecuted(msg.sender, settleToken, takeToken, actualAmountIn, outputAmount);
     }
 
     /// @notice Decode swap parameters based on swap type
@@ -206,10 +166,7 @@ contract MockUniversalRouter {
     /// @return amountOutMinimum Minimum output (for exact in)
     /// @return amountOut Output amount (for exact out)
     /// @return amountInMaximum Maximum input (for exact out)
-    function _decodeSwapParams(
-        bytes[] memory params,
-        bool exactOut
-    )
+    function _decodeSwapParams(bytes[] memory params, bool exactOut)
         public
         pure
         returns (
@@ -223,14 +180,8 @@ contract MockUniversalRouter {
     {
         // params[1] = (settleToken, settleAmount) - input token and amount
         // params[2] = (takeToken, takeAmount) - output token and amount
-        (address settleToken, uint256 settleAmount) = abi.decode(
-            params[1],
-            (address, uint256)
-        );
-        (address takeToken, uint256 takeAmount) = abi.decode(
-            params[2],
-            (address, uint256)
-        );
+        (address settleToken, uint256 settleAmount) = abi.decode(params[1], (address, uint256));
+        (address takeToken, uint256 takeAmount) = abi.decode(params[2], (address, uint256));
 
         // Determine zeroForOne by comparing token addresses
         // zeroForOne = tokenIn (settle) < tokenOut (take) based on V4's sorted pool requirement
@@ -264,10 +215,7 @@ contract MockUniversalRouter {
     /// @notice External wrapper for decode to enable try-catch
     /// @param params Full params array (params[0]=swapParams, params[1]=settle, params[2]=take)
     /// @param exactOut Whether this is an exact output swap
-    function decodeParams(
-        bytes[] memory params,
-        bool exactOut
-    )
+    function decodeParams(bytes[] memory params, bool exactOut)
         external
         pure
         returns (

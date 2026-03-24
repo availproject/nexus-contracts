@@ -8,9 +8,7 @@ contract DeploySwapRouterScript is Script {
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerPrivateKey);
-        address universalRouterAddress = vm.envAddress(
-            "UNIVERSAL_ROUTER_ADDRESS"
-        );
+        address universalRouterAddress = vm.envAddress("UNIVERSAL_ROUTER_ADDRESS");
         address permit2Address = vm.envAddress("PERMIT2_ADDRESS");
 
         console.log("=== UNISWAP V4 ROUTER DEPLOYMENT ===");
@@ -25,10 +23,7 @@ contract DeploySwapRouterScript is Script {
         vm.startBroadcast(deployerPrivateKey);
 
         console.log("\nDeploying UniswapV4Router...");
-        UniswapV4Router router = new UniswapV4Router(
-            universalRouterAddress,
-            permit2Address
-        );
+        UniswapV4Router router = new UniswapV4Router(universalRouterAddress, permit2Address);
         console.log("UniswapV4Router deployed at: ", address(router));
 
         vm.stopBroadcast();
@@ -42,11 +37,7 @@ contract DeploySwapRouterScript is Script {
         // Verification command
         console.log("\n=== VERIFICATION COMMAND ===");
         console.log("To verify UniswapV4Router:");
-        console.log(
-            "forge verify-contract ",
-            address(router),
-            " src/routers/UniswapV4Router.sol:UniswapV4Router"
-        );
+        console.log("forge verify-contract ", address(router), " src/routers/UniswapV4Router.sol:UniswapV4Router");
         console.log("--chain-id ", block.chainid);
         console.log("============================");
     }

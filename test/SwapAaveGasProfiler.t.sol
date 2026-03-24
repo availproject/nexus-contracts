@@ -270,7 +270,7 @@ contract SwapAaveGasProfiler is Test {
         vm.stopPrank();
     }
 
-    /// Helper to execute processPIPath with validation (for backward compatibility in tests)
+    /// Helper to execute processPIPath with validation
     function _executeProcessPIPath(
         bytes32 rootHash,
         bytes32 targetNodeHash,
@@ -281,13 +281,28 @@ contract SwapAaveGasProfiler is Test {
         uint256 nonce
     ) internal {
         INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
-        
-        INexusSettler.TargetNode memory targetNode = INexusSettler.TargetNode({
-            targetType: INexusSettler.TargetType.Destination,
-            chainIdToNode: new bytes(0)
-        });
-        
-        nexusSettler.processPIPath(rootHash, targetNodeHash, path, targetNode, rootNode, nonce);
+
+        // Build proper chainIdToNode data for single chain (k=1)
+        // Format: <k:2><seed:2><chainId:2><hash:32>
+        bytes memory chainIdToNode = new bytes(38);
+        chainIdToNode[0] = bytes1(uint8(0)); // k = 1 (high byte)
+        chainIdToNode[1] = bytes1(uint8(1)); // k = 1 (low byte)
+        chainIdToNode[2] = bytes1(uint8(0)); // seed = 0 (high byte)
+        chainIdToNode[3] = bytes1(uint8(0)); // seed = 0 (low byte)
+        chainIdToNode[4] = bytes1(uint8(uint16(block.chainid) >> 8)); // chainId (high byte)
+        chainIdToNode[5] = bytes1(uint8(uint16(block.chainid))); // chainId (low byte)
+        // Copy targetNodeHash as the hash (32 bytes) - for k=1 with seed=0, this must be keccak256(abi.encode(path[0]))
+        for (uint256 i = 0; i < 32; i++) {
+            chainIdToNode[6 + i] = targetNodeHash[i];
+        }
+
+        INexusSettler.TargetNode memory targetNode =
+            INexusSettler.TargetNode({targetType: INexusSettler.TargetType.Destination, chainIdToNode: chainIdToNode});
+
+        // targetNodeHash must equal keccak256(abi.encode(targetNode))
+        bytes32 computedTargetNodeHash = keccak256(abi.encode(targetNode));
+
+        nexusSettler.processPIPath(rootHash, computedTargetNodeHash, path, targetNode, rootNode, nonce);
     }
 
     // ============================================================================
@@ -446,20 +461,26 @@ contract SwapAaveGasProfiler is Test {
         });
 
         // Node 0: Pull tokens from filler to NexusSettler (points to node 1)
-        path[0] = INexusSettler.IntendNode({
-            next: keccak256(abi.encode(path[1])),
+        // Note: path[0].next should point to path[1] for traversal
+        INexusSettler.IntendNode memory node0 = INexusSettler.IntendNode({
+            next: bytes32(0), // placeholder, will be set to hash of path[1]
             target: address(tokenA),
             data: abi.encodeWithSignature(
                 "transferFrom(address,address,uint256)", fillerDag, address(nexusSettler), SWAP_AMOUNT_IN
             )
         });
+        // Must assign to path[0] first so path[1] is fully initialized
+        path[0] = node0;
+        // Now set next to point to path[1]
+        path[0].next = keccak256(abi.encode(path[1]));
 
         // 5. Measure gas and execute
-        bytes32 targetNodeHash = keccak256(abi.encode(rootHash, "destination"));
+        // entryNodeHash is the hash that goes into chainIdToNode (must be keccak256(abi.encode(path[0])))
+        bytes32 entryNodeHash = keccak256(abi.encode(path[0]));
 
         vm.prank(fillerDag);
         uint256 gasStart = gasleft();
-        _executeProcessPIPath(rootHash, targetNodeHash, path, s, d, o, nonce);
+        _executeProcessPIPath(rootHash, entryNodeHash, path, s, d, o, nonce);
         uint256 gasUsed = gasStart - gasleft();
 
         // 6. Log results
@@ -467,7 +488,23 @@ contract SwapAaveGasProfiler is Test {
         console2.log("Gas used:", gasUsed);
 
         // 7. Verify state
-        bytes32 completionKey = keccak256(abi.encode(rootHash, targetNodeHash));
+        // completionKey uses the computed targetNodeHash (keccak256(abi.encode(targetNode)))
+        bytes memory chainIdToNodeVerify = new bytes(38);
+        chainIdToNodeVerify[0] = bytes1(uint8(0));
+        chainIdToNodeVerify[1] = bytes1(uint8(1));
+        chainIdToNodeVerify[2] = bytes1(uint8(0));
+        chainIdToNodeVerify[3] = bytes1(uint8(0));
+        chainIdToNodeVerify[4] = bytes1(uint8(uint16(block.chainid) >> 8));
+        chainIdToNodeVerify[5] = bytes1(uint8(uint16(block.chainid)));
+        for (uint256 i = 0; i < 32; i++) {
+            chainIdToNodeVerify[6 + i] = entryNodeHash[i];
+        }
+        INexusSettler.TargetNode memory targetNodeVerify = INexusSettler.TargetNode({
+            targetType: INexusSettler.TargetType.Destination,
+            chainIdToNode: chainIdToNodeVerify
+        });
+        bytes32 computedTargetNodeHash = keccak256(abi.encode(targetNodeVerify));
+        bytes32 completionKey = keccak256(abi.encode(rootHash, computedTargetNodeHash));
         assertTrue(nexusSettler.completed(completionKey), "Path should be completed");
 
         // Verify filler has aTokens
@@ -579,20 +616,26 @@ contract SwapAaveGasProfiler is Test {
         });
 
         // Node 0: Pull tokens
-        path[0] = INexusSettler.IntendNode({
-            next: keccak256(abi.encode(path[1])),
+        // Note: path[0].next should point to path[1] for traversal
+        INexusSettler.IntendNode memory node0ComparisonSwap = INexusSettler.IntendNode({
+            next: bytes32(0), // placeholder, will be set to hash of path[1]
             target: address(tokenA),
             data: abi.encodeWithSignature(
                 "transferFrom(address,address,uint256)", fillerDag, address(nexusSettler), SWAP_AMOUNT_IN
             )
         });
+        // Must assign to path[0] first so path[1] is fully initialized
+        path[0] = node0ComparisonSwap;
+        // Now set next to point to path[1]
+        path[0].next = keccak256(abi.encode(path[1]));
 
         // Measure gas
-        bytes32 targetNodeHash = keccak256(abi.encode(rootHash, "destination"));
+        // entryNodeHash is the hash that goes into chainIdToNode (must be keccak256(abi.encode(path[0])))
+        bytes32 entryNodeHash = keccak256(abi.encode(path[0]));
 
         vm.prank(fillerDag);
         uint256 gasStartDag = gasleft();
-        _executeProcessPIPath(rootHash, targetNodeHash, path, s, d, o, nonce);
+        _executeProcessPIPath(rootHash, entryNodeHash, path, s, d, o, nonce);
         uint256 gasDAG = gasStartDag - gasleft();
 
         // ============ COMPARISON OUTPUT ============
@@ -696,20 +739,26 @@ contract SwapAaveGasProfiler is Test {
         });
 
         // Node 0: Pull tokenB from filler to NexusSettler (points to node 1)
-        path[0] = INexusSettler.IntendNode({
-            next: keccak256(abi.encode(path[1])),
+        // Note: path[0].next should point to path[1] for traversal
+        INexusSettler.IntendNode memory node0DepositOnly = INexusSettler.IntendNode({
+            next: bytes32(0), // placeholder, will be set to hash of path[1]
             target: address(tokenB),
             data: abi.encodeWithSignature(
                 "transferFrom(address,address,uint256)", fillerDag, address(nexusSettler), DEPOSIT_AMOUNT
             )
         });
+        // Must assign to path[0] first so path[1] is fully initialized
+        path[0] = node0DepositOnly;
+        // Now set next to point to path[1]
+        path[0].next = keccak256(abi.encode(path[1]));
 
         // 5. Measure gas and execute
-        bytes32 targetNodeHash = keccak256(abi.encode(rootHash, "destination"));
+        // entryNodeHash is the hash that goes into chainIdToNode (must be keccak256(abi.encode(path[0])))
+        bytes32 entryNodeHash = keccak256(abi.encode(path[0]));
 
         vm.prank(fillerDag);
         uint256 gasStart = gasleft();
-        _executeProcessPIPath(rootHash, targetNodeHash, path, s, d, o, nonce);
+        _executeProcessPIPath(rootHash, entryNodeHash, path, s, d, o, nonce);
         uint256 gasUsed = gasStart - gasleft();
 
         // 6. Log results
@@ -717,7 +766,23 @@ contract SwapAaveGasProfiler is Test {
         console2.log("Gas used:", gasUsed);
 
         // 7. Verify state
-        bytes32 completionKey = keccak256(abi.encode(rootHash, targetNodeHash));
+        // completionKey uses the computed targetNodeHash (keccak256(abi.encode(targetNode)))
+        bytes memory chainIdToNodeVerify = new bytes(38);
+        chainIdToNodeVerify[0] = bytes1(uint8(0));
+        chainIdToNodeVerify[1] = bytes1(uint8(1));
+        chainIdToNodeVerify[2] = bytes1(uint8(0));
+        chainIdToNodeVerify[3] = bytes1(uint8(0));
+        chainIdToNodeVerify[4] = bytes1(uint8(uint16(block.chainid) >> 8));
+        chainIdToNodeVerify[5] = bytes1(uint8(uint16(block.chainid)));
+        for (uint256 i = 0; i < 32; i++) {
+            chainIdToNodeVerify[6 + i] = entryNodeHash[i];
+        }
+        INexusSettler.TargetNode memory targetNodeVerify = INexusSettler.TargetNode({
+            targetType: INexusSettler.TargetType.Destination,
+            chainIdToNode: chainIdToNodeVerify
+        });
+        bytes32 computedTargetNodeHash = keccak256(abi.encode(targetNodeVerify));
+        bytes32 completionKey = keccak256(abi.encode(rootHash, computedTargetNodeHash));
         assertTrue(nexusSettler.completed(completionKey), "Path should be completed");
 
         // Verify filler has aTokens
@@ -794,20 +859,26 @@ contract SwapAaveGasProfiler is Test {
         });
 
         // Node 0: Pull tokens
-        path[0] = INexusSettler.IntendNode({
-            next: keccak256(abi.encode(path[1])),
-            target: address(tokenB),
+        // Note: path[0].next should point to path[1] for traversal
+        INexusSettler.IntendNode memory node0Comparison = INexusSettler.IntendNode({
+            next: bytes32(0), // placeholder, will be set to hash of path[1]
+            target: address(tokenB),  // Should be tokenB for deposit-only flow
             data: abi.encodeWithSignature(
                 "transferFrom(address,address,uint256)", fillerDag, address(nexusSettler), DEPOSIT_AMOUNT
             )
         });
+        // Must assign to path[0] first so path[1] is fully initialized
+        path[0] = node0Comparison;
+        // Now set next to point to path[1]
+        path[0].next = keccak256(abi.encode(path[1]));
 
         // Measure gas
-        bytes32 targetNodeHash = keccak256(abi.encode(rootHash, "destination"));
+        // entryNodeHash is the hash that goes into chainIdToNode (must be keccak256(abi.encode(path[0])))
+        bytes32 entryNodeHash = keccak256(abi.encode(path[0]));
 
         vm.prank(fillerDag);
         uint256 gasStartDag = gasleft();
-        _executeProcessPIPath(rootHash, targetNodeHash, path, s, d, o, nonce);
+        _executeProcessPIPath(rootHash, entryNodeHash, path, s, d, o, nonce);
         uint256 gasDAG = gasStartDag - gasleft();
 
         // ============ COMPARISON OUTPUT ============
@@ -911,20 +982,26 @@ contract SwapAaveGasProfiler is Test {
         });
 
         // Node 0: Pull tokenA from filler to NexusSettler (points to node 1)
-        path[0] = INexusSettler.IntendNode({
-            next: keccak256(abi.encode(path[1])),
+        // Note: path[0].next should point to path[1] for traversal
+        INexusSettler.IntendNode memory node0DepositSwapDeposit = INexusSettler.IntendNode({
+            next: bytes32(0), // placeholder, will be set to hash of path[1]
             target: address(tokenA),
             data: abi.encodeWithSignature(
                 "transferFrom(address,address,uint256)", fillerDag, address(nexusSettler), SWAP_AMOUNT_IN
             )
         });
+        // Must assign to path[0] first so path[1] is fully initialized
+        path[0] = node0DepositSwapDeposit;
+        // Now set next to point to path[1]
+        path[0].next = keccak256(abi.encode(path[1]));
 
         // 5. Measure gas and execute
-        bytes32 targetNodeHash = keccak256(abi.encode(rootHash, "destination"));
+        // entryNodeHash is the hash that goes into chainIdToNode (must be keccak256(abi.encode(path[0])))
+        bytes32 entryNodeHash = keccak256(abi.encode(path[0]));
 
         vm.prank(fillerDag);
         uint256 gasStart = gasleft();
-        _executeProcessPIPath(rootHash, targetNodeHash, path, s, d, o, nonce);
+        _executeProcessPIPath(rootHash, entryNodeHash, path, s, d, o, nonce);
         uint256 gasUsed = gasStart - gasleft();
 
         // 6. Log results
@@ -932,7 +1009,23 @@ contract SwapAaveGasProfiler is Test {
         console2.log("Gas used:", gasUsed);
 
         // 7. Verify state
-        bytes32 completionKey = keccak256(abi.encode(rootHash, targetNodeHash));
+        // completionKey uses the computed targetNodeHash (keccak256(abi.encode(targetNode)))
+        bytes memory chainIdToNodeVerifyDSD = new bytes(38);
+        chainIdToNodeVerifyDSD[0] = bytes1(uint8(0));
+        chainIdToNodeVerifyDSD[1] = bytes1(uint8(1));
+        chainIdToNodeVerifyDSD[2] = bytes1(uint8(0));
+        chainIdToNodeVerifyDSD[3] = bytes1(uint8(0));
+        chainIdToNodeVerifyDSD[4] = bytes1(uint8(uint16(block.chainid) >> 8));
+        chainIdToNodeVerifyDSD[5] = bytes1(uint8(uint16(block.chainid)));
+        for (uint256 i = 0; i < 32; i++) {
+            chainIdToNodeVerifyDSD[6 + i] = entryNodeHash[i];
+        }
+        INexusSettler.TargetNode memory targetNodeVerifyDSD = INexusSettler.TargetNode({
+            targetType: INexusSettler.TargetType.Destination,
+            chainIdToNode: chainIdToNodeVerifyDSD
+        });
+        bytes32 computedTargetNodeHashDSD = keccak256(abi.encode(targetNodeVerifyDSD));
+        bytes32 completionKey = keccak256(abi.encode(rootHash, computedTargetNodeHashDSD));
         assertTrue(nexusSettler.completed(completionKey), "Path should be completed");
 
         // Verify filler has aTokens
@@ -1054,20 +1147,26 @@ contract SwapAaveGasProfiler is Test {
         });
 
         // Node 0: Pull tokens
-        path[0] = INexusSettler.IntendNode({
-            next: keccak256(abi.encode(path[1])),
+        // Note: path[0].next should point to path[1] for traversal
+        INexusSettler.IntendNode memory node0ComparisonFinal = INexusSettler.IntendNode({
+            next: bytes32(0), // placeholder, will be set to hash of path[1]
             target: address(tokenA),
             data: abi.encodeWithSignature(
                 "transferFrom(address,address,uint256)", fillerDag, address(nexusSettler), SWAP_AMOUNT_IN
             )
         });
+        // Must assign to path[0] first so path[1] is fully initialized
+        path[0] = node0ComparisonFinal;
+        // Now set next to point to path[1]
+        path[0].next = keccak256(abi.encode(path[1]));
 
         // Measure gas
-        bytes32 targetNodeHash = keccak256(abi.encode(rootHash, "destination"));
+        // entryNodeHash is the hash that goes into chainIdToNode (must be keccak256(abi.encode(path[0])))
+        bytes32 entryNodeHash = keccak256(abi.encode(path[0]));
 
         vm.prank(fillerDag);
         uint256 gasStartDag = gasleft();
-        _executeProcessPIPath(rootHash, targetNodeHash, path, s, d, o, nonce);
+        _executeProcessPIPath(rootHash, entryNodeHash, path, s, d, o, nonce);
         uint256 gasDAG = gasStartDag - gasleft();
 
         // ============ COMPARISON OUTPUT ============

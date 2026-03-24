@@ -41,19 +41,11 @@ contract DeployScript is Script {
         // Verification commands
         console.log("\n=== VERIFICATION COMMANDS ===");
         console.log("To verify NexusEscrow:");
-        console.log(
-            "forge verify-contract ",
-            address(escrow),
-            " src/NexusEscrow.sol:NexusEscrow"
-        );
+        console.log("forge verify-contract ", address(escrow), " src/NexusEscrow.sol:NexusEscrow");
         console.log("--chain-id ", block.chainid);
 
         console.log("\nTo verify NexusSettler:");
-        console.log(
-            "forge verify-contract ",
-            address(settler),
-            " src/NexusSettler.sol:NexusSettler"
-        );
+        console.log("forge verify-contract ", address(settler), " src/NexusSettler.sol:NexusSettler");
         console.log("--chain-id ", block.chainid);
         console.log("=============================");
     }

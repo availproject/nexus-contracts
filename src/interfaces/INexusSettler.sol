@@ -17,7 +17,7 @@ interface INexusSettler {
         BRIDGE_AND_SWAP
     }
 
-    /// Kept for IActionRouter compatibility  
+    /// Kept for IActionRouter compatibility
     struct Action {
         ActionType actionType;
         string target;
@@ -40,9 +40,9 @@ interface INexusSettler {
 
     /// Root node containing source, destination, and offchain intent roots
     struct RootNode {
-        bytes32 s;  // source root
-        bytes32 d;  // destination root
-        bytes32 o;  // offchain intents root
+        bytes32 s; // source root
+        bytes32 d; // destination root
+        bytes32 o; // offchain intents root
     }
 
     /// Target type for distinguishing source vs destination
@@ -54,7 +54,7 @@ interface INexusSettler {
     /// Target node with type and chain-to-node mapping
     struct TargetNode {
         TargetType targetType;
-        bytes chainIdToNode;  // <k:2><seed:2><chainId_0:2><hash_0:32>...
+        bytes chainIdToNode; // <k:2><seed:2><chainId_0:2><hash_0:32>...
     }
 
     error InvalidSignature();
@@ -94,7 +94,7 @@ interface INexusSettler {
 
     /**
      * @notice Node skipped (already processed)
-     * @param nodeHash Hash of skipped node  
+     * @param nodeHash Hash of skipped node
      * @param level Depth in path (0-indexed)
      */
     event IntendNodeSkipped(bytes32 indexed nodeHash, uint256 level);
@@ -106,12 +106,7 @@ interface INexusSettler {
      * @param graphRoot Root hash of intent
      * @param height Nodes executed
      */
-    event IntendPathProcessed(
-        bytes32 indexed targetNodeHash,
-        bytes32 lastNodeHash,
-        bytes32 graphRoot,
-        uint256 height
-    );
+    event IntendPathProcessed(bytes32 indexed targetNodeHash, bytes32 lastNodeHash, bytes32 graphRoot, uint256 height);
 
     /**
      * @notice Creates a signed Path Intent
@@ -121,12 +116,7 @@ interface INexusSettler {
      * @param nonce Prevents collision between identical rootNode values
      * @param rootNode Source, destination, and offchain roots
      */
-    function createPI(
-        bytes32 rootHash,
-        bytes calldata signature,
-        uint256 nonce,
-        RootNode calldata rootNode
-    ) external;
+    function createPI(bytes32 rootHash, bytes calldata signature, uint256 nonce, RootNode calldata rootNode) external;
 
     /**
      * @notice Executes path with chain ID validation

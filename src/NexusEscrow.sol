@@ -13,7 +13,7 @@ contract NexusEscrow is INexusEscrow {
     // TODO: access control
     function settle(Settlement[] calldata settlements) external {
         uint256 i;
-        for (i = 0; i < settlements.length; ) {
+        for (i = 0; i < settlements.length;) {
             Settlement memory settlement = settlements[i];
             IERC20 token = IERC20(address(bytes20(settlement.token)));
             address recipient = address(bytes20(settlement.recipient));

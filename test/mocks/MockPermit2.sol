@@ -16,9 +16,12 @@ contract MockPermit2 {
     function approve(
         address token,
         address spender,
-        uint160 /* amount */,
+        uint160,
+        /* amount */
         uint48 /* expiration */
-    ) external {
+    )
+        external
+    {
         // Transfer tokens from caller (UniswapV4Router) to this contract
         // This simulates Permit2 holding the tokens
         uint256 balance = IERC20(token).balanceOf(msg.sender);

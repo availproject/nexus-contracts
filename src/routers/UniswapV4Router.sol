@@ -36,21 +36,17 @@ contract UniswapV4Router is IActionRouter {
         PERMIT_2 = IPermit2(_permit2);
     }
 
-    function execute(
-        INexusSettler.Action calldata action,
-        bytes calldata previousData
-    ) external returns (bytes memory) {
+    function execute(INexusSettler.Action calldata action, bytes calldata previousData)
+        external
+        returns (bytes memory)
+    {
         if (action.actionType != INexusSettler.ActionType.SWAP) {
             revert("Invalid action type");
         }
         Swap memory swap = abi.decode(action.callData, (Swap));
         uint128 maxAmountIn = swap.maxAmountIn;
-        address tokenIn = swap.zeroForOne
-            ? Currency.unwrap(swap.key.currency0)
-            : Currency.unwrap(swap.key.currency1);
-        Currency tokenOut = swap.zeroForOne
-            ? swap.key.currency1
-            : swap.key.currency0;
+        address tokenIn = swap.zeroForOne ? Currency.unwrap(swap.key.currency0) : Currency.unwrap(swap.key.currency1);
+        Currency tokenOut = swap.zeroForOne ? swap.key.currency1 : swap.key.currency0;
 
         if (maxAmountIn == 0) {
             if (previousData.length != 32) revert InvalidPreviousData();
@@ -65,31 +61,19 @@ contract UniswapV4Router is IActionRouter {
         IERC20(tokenIn).transferFrom(msg.sender, address(this), maxAmountIn);
 
         // Step 1: Approve Permit2 to spend tokens from this contract (one-time, max approval)
-        if (
-            IERC20(tokenIn).allowance(address(this), address(PERMIT_2)) <
-            maxAmountIn
-        ) {
+        if (IERC20(tokenIn).allowance(address(this), address(PERMIT_2)) < maxAmountIn) {
             IERC20(tokenIn).approve(address(PERMIT_2), type(uint256).max);
         }
 
         // Step 2: Use Permit2 to approve ROUTER to spend tokens
         // Set expiration to max uint48 for persistent approval
-        PERMIT_2.approve(
-            tokenIn,
-            address(ROUTER),
-            type(uint160).max,
-            type(uint48).max
-        );
+        PERMIT_2.approve(tokenIn, address(ROUTER), type(uint160).max, type(uint48).max);
 
         bytes memory commands = abi.encodePacked(uint8(Commands.V4_SWAP));
         bytes[] memory inputs = new bytes[](1);
 
         bytes memory actions = abi.encodePacked(
-            uint8(
-                swap.exactOut
-                    ? Actions.SWAP_EXACT_OUT_SINGLE
-                    : Actions.SWAP_EXACT_IN_SINGLE
-            ),
+            uint8(swap.exactOut ? Actions.SWAP_EXACT_OUT_SINGLE : Actions.SWAP_EXACT_IN_SINGLE),
             uint8(Actions.SETTLE_ALL),
             uint8(Actions.TAKE_ALL)
         );

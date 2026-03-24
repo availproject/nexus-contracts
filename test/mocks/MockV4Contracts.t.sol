@@ -199,7 +199,7 @@ contract MockV4ContractsTest is Test {
         bytes memory actions = abi.encodePacked(
             uint8(0x06), // SWAP_EXACT_IN_SINGLE
             uint8(0x0c), // SETTLE_ALL
-            uint8(0x0f)  // TAKE_ALL
+            uint8(0x0f) // TAKE_ALL
         );
 
         // Encode params
@@ -264,12 +264,8 @@ contract MockV4ContractsTest is Test {
         uint256 balanceBefore1 = token1.balanceOf(user);
 
         vm.prank(user);
-        uint256 amountOut = v4SwapRouter.executeSwap(
-            address(token0),
-            address(token1),
-            SWAP_AMOUNT,
-            EXPECTED_OUTPUT - 1e18
-        );
+        uint256 amountOut =
+            v4SwapRouter.executeSwap(address(token0), address(token1), SWAP_AMOUNT, EXPECTED_OUTPUT - 1e18);
 
         uint256 balanceAfter0 = token0.balanceOf(user);
         uint256 balanceAfter1 = token1.balanceOf(user);
@@ -321,11 +317,7 @@ contract MockV4ContractsTest is Test {
     function testGas_MockUniversalRouter_Execute() public {
         PoolKey memory key = _createPoolKey();
 
-        bytes memory actions = abi.encodePacked(
-            uint8(0x06),
-            uint8(0x0c),
-            uint8(0x0f)
-        );
+        bytes memory actions = abi.encodePacked(uint8(0x06), uint8(0x0c), uint8(0x0f));
 
         bytes[] memory params = new bytes[](3);
         params[0] = abi.encode(key, true, SWAP_AMOUNT, EXPECTED_OUTPUT - 1e18, bytes(""));
@@ -348,12 +340,7 @@ contract MockV4ContractsTest is Test {
     function testGas_MockV4SwapRouter_ExecuteSwap() public {
         vm.prank(user);
         uint256 gasStart = gasleft();
-        v4SwapRouter.executeSwap(
-            address(token0),
-            address(token1),
-            SWAP_AMOUNT,
-            EXPECTED_OUTPUT - 1e18
-        );
+        v4SwapRouter.executeSwap(address(token0), address(token1), SWAP_AMOUNT, EXPECTED_OUTPUT - 1e18);
         uint256 gasUsed = gasStart - gasleft();
 
         console2.log("MockV4SwapRouter.executeSwap() gas:", gasUsed);
