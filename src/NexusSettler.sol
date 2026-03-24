@@ -9,150 +9,122 @@ import {INexusSettler} from "./interfaces/INexusSettler.sol";
 
 /**
  * @title NexusSettler
- * @notice Zero-overhead cross-chain intent settlement contract
- * @author Rachit Anand Srivastava ( @privacy_prophet )
- * @dev DAG architecture where all node data lives in calldata, not storage.
- *      RootNode, TargetNode, and IntendNodes are verified and executed on-demand.
- *      We only store completion flags: one bool per rootHash creation, one per (root, target) completion,
- *      and one per individual node execution. Total gas for a full intent lifecycle runs ~75k.
- *      Storage grows linearly with unique intents, not with node count—100 nodes in a path
- *      costs the same storage as 1 node.
+ * @notice Zero-storage cross-chain intent settlement
+ * @author Rachit Anand Srivastava (@privacy_prophet)
+ * @dev All node data lives in calldata—only completion flags touch storage.
+ *      Three mappings track state: created[rootHash], completed[completionKey], 
+ *      and processedNodes[nodeKey]. A 100-node path costs the same storage 
+ *      as 1 node (~75k gas total lifecycle).
  */
 contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
     using Address for address;
 
-    /**
-     * @notice Escrow contract address for fund locking
-     */
+    /// Escrow contract for fund locking
     address public immutable escrow;
 
-    /**
-     * @notice Tracks created rootHashes to prevent replay attacks
-     * @dev Once a rootHash is created, it cannot be reused. The rootHash includes
-     *      a nonce, so even identical (s, d, o) triples produce different hashes.
-     */
+    /// Prevents replay: each rootHash can only be created once
     mapping(bytes32 => bool) public created;
 
-    /**
-     * @notice Tracks completed (rootHash, targetNodeHash) pairs
-     * @dev Each rootHash can complete multiple paths (source, destination, offchain).
-     *      The key keccak256(rootHash, targetNodeHash) ensures each path completes once.
-     */
+    /// Tracks which (rootHash, targetNodeHash) pairs finished execution
     mapping(bytes32 => bool) public completed;
 
-    /**
-     * @notice Tracks individual IntendNodes that have been processed
-     * @dev Key = keccak256(rootHash, targetNodeHash, nodeHash). When a path is
-     *      partially executed and called again, already-processed nodes skip
-     *      execution and emit IntendNodeSkipped instead of IntendNodeExec.
-     */
+    /// Tracks individual node execution to prevent re-execution
     mapping(bytes32 => bool) public processedNodes;
 
-    /**
-     * @notice EIP-712 typehash for Path Intent with nonce
-     * @dev Used for signature verification including nonce parameter
-     */
+    /// EIP-712 typehash: NexusPI(bytes32 rootHash,uint256 nonce)
     bytes32 private constant PI_TYPEHASH =
         keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
 
-    /**
-     * @notice Maximum path length to prevent gas griefing
-     */
+    /// Prevents gas griefing from unbounded paths
     uint256 private constant MAX_PATH_LENGTH = 100;
 
-    /**
-     * @notice Contract constructor
-     * @param newEscrow Address of escrow contract
-     */
     constructor(address newEscrow) EIP712("NexusSettler", "2") {
         require(newEscrow != address(0), "Invalid escrow");
         escrow = newEscrow;
     }
 
     /**
-     * @notice Creates a Path Intent with signature verification
-     * @inheritdoc INexusSettler
-     * @dev Caller provides rootHash = keccak256(s, d, o, nonce) and a signature over (rootHash, nonce).
-     *      We verify the commitment matches, recover the signer, and mark rootHash as created.
-     *      The nonce ensures that identical (s, d, o) values across different intents
-     *      produce unique rootHashes, preventing collision attacks.
-     * @param rootHash Commitment hash = keccak256(s, d, o, nonce)
+     * @notice Creates a signed Path Intent
+     * @dev Verifies keccak256(rootNode, nonce) matches rootHash and signature is valid.
+     *      The nonce ensures identical rootNode values produce unique rootHashes.
+     * @param rootHash Commitment hash
      * @param signature EIP-712 signature of (rootHash, nonce)
-     * @param nonce Unique nonce to prevent rootHash collisions
-     * @param s Source target hash (provided, not stored)
-     * @param d Destination target hash (provided, not stored)
-     * @param o Offchain target hash (provided, not stored)
+     * @param nonce Unique nonce preventing rootHash collisions
+     * @param rootNode Source, destination, and offchain roots
      */
     function createPI(
         bytes32 rootHash,
         bytes calldata signature,
         uint256 nonce,
-        bytes32 s,
-        bytes32 d,
-        bytes32 o
+        RootNode calldata rootNode
     ) external nonReentrant {
-        // Check rootHash not already created
         if (created[rootHash]) revert IntentAlreadyExists();
 
-        // Verify commitment: keccak256(s, d, o, nonce) == rootHash
-        bytes32 computedRoot = keccak256(abi.encode(s, d, o, nonce));
+        bytes32 computedRoot = keccak256(abi.encode(rootNode, nonce));
         if (computedRoot != rootHash) revert InvalidRootHash();
 
-        // Verify signature using EIP-712 with nonce
         bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
         bytes32 hash = _hashTypedDataV4(structHash);
         address signer = ECDSA.recover(hash, signature);
         
-        // Ensure signature is valid
         if (signer == address(0)) revert InvalidSignature();
 
-        // Mark rootHash as created
         created[rootHash] = true;
-
-        // Emit creation event
         emit PICreated(rootHash, signer);
     }
 
     /**
-     * @notice Processes an intent path - PURE EXECUTION with partial support
-     * @inheritdoc INexusSettler
-     * @dev Executes nodes from calldata until hitting a missing next pointer or reaching
-     *      a node with next == bytes32(0). Only marks the path as completed when we
-     *      reach that terminal node. If execution stops mid-path (next node not in calldata),
-     *      the caller can resume by providing the remaining nodes in a subsequent call.
-     *      Already-processed nodes are skipped, emitting IntendNodeSkipped instead of IntendNodeExec.
+     * @notice Executes path with chain ID validation and preimage verification
+     * @dev 5-step validation: (1) created check, (2) commitment verify, 
+     *      (3) extract target for current chain, (4) match targetNodeHash,
+     *      (5) verify path[0] preimage matches targetNodeHash.
      * @param rootHash Root commitment hash
-     * @param targetNodeHash Target node hash (for replay protection key)
-     * @param path Array of IntendNodes to execute (from calldata)
+     * @param targetNodeHash Must match extracted target from chainIdToNode
+     * @param path IntendNodes to execute (path[0] is entry point)
+     * @param targetNode Target type and chain-to-node mapping
+     * @param rootNode Source, destination, and offchain roots
+     * @param nonce Nonce from commitment
      */
     function processPIPath(
         bytes32 rootHash,
         bytes32 targetNodeHash,
-        IntendNode[] calldata path
+        IntendNode[] calldata path,
+        TargetNode calldata targetNode,
+        RootNode calldata rootNode,
+        uint256 nonce
     ) external nonReentrant {
-        // Compute unique key for this (root, target) pair
-        bytes32 completionKey = keccak256(abi.encode(rootHash, targetNodeHash));
-        
-        // Check not already completed (ONLY storage read)
-        if (completed[completionKey]) revert PathAlreadyProcessed();
+        if (!created[rootHash]) revert IntentAlreadyExists();
 
-        // Verify path is not empty
+        bytes32 computedRoot = keccak256(abi.encode(rootNode, nonce));
+        if (computedRoot != rootHash) revert InvalidRootHash();
+
+        // Extract target hash for current chain from chainIdToNode
+        bytes32 targetHash = _extractTargetHash(targetNode.chainIdToNode);
+
+        if (targetNodeHash != targetHash) revert InvalidTarget();
+
+        bytes32 completionKey = keccak256(abi.encode(rootHash, targetNodeHash));
+        bool isFirstCall = !processedNodes[keccak256(abi.encode(completionKey, "first"))];
+        
+        if (isFirstCall) {
+            if (path.length == 0) revert EmptyPath();
+            bytes32 firstNodeHash = keccak256(abi.encode(path[0]));
+            if (path[0].next != firstNodeHash) revert InvalidPath();
+        }
+
+        if (completed[completionKey]) revert PathAlreadyProcessed();
         if (path.length == 0) revert EmptyPath();
 
-        // Execute path starting from first node
-        // Returns (height, isComplete, lastNodeHash)
         (uint256 height, bool isComplete, bytes32 lastNodeHash) = _executePath(
             rootHash,
             targetNodeHash,
             path
         );
 
-        // Only mark as completed if we reached the end (next == bytes32(0))
         if (isComplete) {
             completed[completionKey] = true;
         }
 
-        // Emit completion event (even for partial execution)
         emit IntendPathProcessed(
             targetNodeHash,
             lastNodeHash,
@@ -162,20 +134,15 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
     }
 
     /**
-     * @notice Execute IntendNode path from calldata
-     * @dev Traverses the path following next pointers. For each node:
-     *      1. Check for cycles (same nodeHash seen twice)
-     *      2. Check if already processed (skip and emit IntendNodeSkipped)
-     *      3. Mark as processed, emit IntendNodeExec, execute the call
-     *      4. Follow next pointer or stop if missing/terminal
-     *      Returns the count of nodes visited, whether we reached a terminal node,
-     *      and the hash of the last node processed.
-     * @param rootHash Root commitment hash for node key
-     * @param targetNodeHash Target node hash for node key
-     * @param path Array of IntendNodes from calldata
-     * @return height Number of nodes executed (including skipped)
-     * @return isComplete True if reached end of path (next == bytes32(0))
-     * @return lastNodeHash Hash of the last executed/skipped node
+     * @notice Executes IntendNode path from calldata
+     * @dev Traverses path following next pointers. For each node:
+     *      - Detect cycles via visited[] array
+     *      - Skip already-processed nodes (emit IntendNodeSkipped)
+     *      - Execute unprocessed nodes (emit IntendNodeExec)
+     *      - Follow next pointer or stop if missing/terminal
+     * @return height Nodes executed (including skipped)
+     * @return isComplete True if reached terminal (next == 0)
+     * @return lastNodeHash Hash of last executed/skipped node
      */
     function _executePath(
         bytes32 rootHash,
@@ -189,63 +156,44 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
         bytes32[MAX_PATH_LENGTH] memory visited;
 
         while (currentIdx < path.length) {
-            // Check max length
             if (height >= MAX_PATH_LENGTH) revert InvalidPath();
 
-            // Get current node
             IntendNode calldata node = path[currentIdx];
             
-            // Check for cycles using node hash
             bytes32 nodeHash = keccak256(abi.encode(node));
             for (uint256 i = 0; i < height; i++) {
                 if (visited[i] == nodeHash) revert CycleDetected();
             }
             visited[height] = nodeHash;
 
-            // Validate target
             if (node.target == address(0)) revert InvalidPath();
 
-            // Compute node key for tracking
             bytes32 nodeKey = keccak256(abi.encode(rootHash, targetNodeHash, nodeHash));
 
-            // Check if node already processed
             if (processedNodes[nodeKey]) {
-                // Skip execution, emit skipped event
                 emit IntendNodeSkipped(nodeHash, height);
             } else {
-                // Mark as processed BEFORE execution (reentrancy protection)
                 processedNodes[nodeKey] = true;
-
-                // Emit execution event
                 emit IntendNodeExec(nodeHash, height);
-
-                // Execute action
                 _executeAction(node.target, node.data);
             }
 
             height++;
             lastNodeHash = nodeHash;
 
-            // Check if this is the end of the path
             if (node.next == bytes32(0)) {
-                // End of path - mark as complete
                 isComplete = true;
                 break;
             }
             
-            // O(1) hash verification: assume nodes are in execution order
-            // Check if there's a next node in the array
             if (currentIdx + 1 < path.length) {
-                // Verify hash of next node matches node.next
                 if (keccak256(abi.encode(path[currentIdx + 1])) == node.next) {
-                    currentIdx = currentIdx + 1;  // O(1) - just increment!
+                    currentIdx = currentIdx + 1;
                 } else {
-                    // Hash mismatch - partial execution
                     isComplete = false;
                     break;
                 }
             } else {
-                // No more nodes in array but next pointer is non-zero
                 isComplete = false;
                 break;
             }
@@ -253,10 +201,46 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
     }
 
     /**
-     * @notice Execute action at target address
-     * @dev Low-level call with no value. Reverts on failure, bubbling up
-     *      as InvalidPath. The caller is responsible for encoding correct calldata.
-     * @param target Contract to call
+     * @notice Extracts target hash using seed-based perfect hash lookup
+     * @dev Data format: <k:2><seed:2><chainId_0:2><hash_0:32>...<chainId_{k-1}:2><hash_{k-1}:32>
+     *      Each slot = 34 bytes. Off-chain encoder picks k and seed so 
+     *      keccak256(chainId, seed) % k gives collision-free slots.
+     * @param data Perfect hash table bytes
+     * @return targetHash 32-byte hash for current chain
+     */
+    function _extractTargetHash(bytes calldata data) internal view returns (bytes32) {
+        if (data.length < 38) revert InvalidTargetFormat();
+
+        uint16 k;
+        uint16 seed;
+        assembly {
+            let header := calldataload(data.offset)
+            k    := shr(240, header)
+            seed := shr(240, shl(16, header))
+        }
+
+        if (k == 0 || data.length != uint256(4) + uint256(k) * 34) revert InvalidTargetFormat();
+
+        uint256 slot = uint256(keccak256(abi.encodePacked(uint16(block.chainid), seed))) % k;
+        uint256 entryPos = 4 + slot * 34;
+
+        uint16 entryChainId;
+        bytes32 targetHash;
+        assembly {
+            let word := calldataload(add(data.offset, entryPos))
+            entryChainId := shr(240, word)
+            targetHash := calldataload(add(data.offset, add(entryPos, 2)))
+        }
+
+        if (entryChainId != uint16(block.chainid)) revert ChainIdNotFound(uint16(block.chainid));
+
+        return targetHash;
+    }
+
+    /**
+     * @notice Executes low-level call at target address
+     * @dev Reverts on failure, bubbling up as InvalidPath.
+     * @param target Contract address
      * @param data Calldata
      */
     function _executeAction(address target, bytes calldata data) private {

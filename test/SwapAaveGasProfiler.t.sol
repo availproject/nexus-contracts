@@ -270,6 +270,26 @@ contract SwapAaveGasProfiler is Test {
         vm.stopPrank();
     }
 
+    /// Helper to execute processPIPath with validation (for backward compatibility in tests)
+    function _executeProcessPIPath(
+        bytes32 rootHash,
+        bytes32 targetNodeHash,
+        INexusSettler.IntendNode[] memory path,
+        bytes32 s,
+        bytes32 d,
+        bytes32 o,
+        uint256 nonce
+    ) internal {
+        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
+        
+        INexusSettler.TargetNode memory targetNode = INexusSettler.TargetNode({
+            targetType: INexusSettler.TargetType.Destination,
+            chainIdToNode: new bytes(0)
+        });
+        
+        nexusSettler.processPIPath(rootHash, targetNodeHash, path, targetNode, rootNode, nonce);
+    }
+
     // ============================================================================
     // Direct Sequential Gas Profile Tests
     // ============================================================================
@@ -377,7 +397,8 @@ contract SwapAaveGasProfiler is Test {
         bytes memory signature = abi.encodePacked(r, s_sig, v);
 
         // 3. Call createPI
-        nexusSettler.createPI(rootHash, signature, nonce, s, d, o);
+        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
+        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
 
         // 4. Create IntendNode[] path with 4 connected nodes:
         // Node 0: Pull tokens from filler to NexusSettler
@@ -438,7 +459,7 @@ contract SwapAaveGasProfiler is Test {
 
         vm.prank(fillerDag);
         uint256 gasStart = gasleft();
-        nexusSettler.processPIPath(rootHash, targetNodeHash, path);
+        _executeProcessPIPath(rootHash, targetNodeHash, path, s, d, o, nonce);
         uint256 gasUsed = gasStart - gasleft();
 
         // 6. Log results
@@ -513,7 +534,8 @@ contract SwapAaveGasProfiler is Test {
         (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
         bytes memory signature = abi.encodePacked(r, s_sig, v);
 
-        nexusSettler.createPI(rootHash, signature, nonce, s, d, o);
+        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
+        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
 
         // Create 4-node path (same as DAG test)
         INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](4);
@@ -570,7 +592,7 @@ contract SwapAaveGasProfiler is Test {
 
         vm.prank(fillerDag);
         uint256 gasStartDag = gasleft();
-        nexusSettler.processPIPath(rootHash, targetNodeHash, path);
+        _executeProcessPIPath(rootHash, targetNodeHash, path, s, d, o, nonce);
         uint256 gasDAG = gasStartDag - gasleft();
 
         // ============ COMPARISON OUTPUT ============
@@ -656,7 +678,8 @@ contract SwapAaveGasProfiler is Test {
         bytes memory signature = abi.encodePacked(r, s_sig, v);
 
         // 3. Call createPI
-        nexusSettler.createPI(rootHash, signature, nonce, s, d, o);
+        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
+        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
 
         // 4. Create IntendNode[] path with 2 connected nodes:
         // Node 0: Pull tokenB from filler to NexusSettler
@@ -686,7 +709,7 @@ contract SwapAaveGasProfiler is Test {
 
         vm.prank(fillerDag);
         uint256 gasStart = gasleft();
-        nexusSettler.processPIPath(rootHash, targetNodeHash, path);
+        _executeProcessPIPath(rootHash, targetNodeHash, path, s, d, o, nonce);
         uint256 gasUsed = gasStart - gasleft();
 
         // 6. Log results
@@ -755,7 +778,8 @@ contract SwapAaveGasProfiler is Test {
         (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
         bytes memory signature = abi.encodePacked(r, s_sig, v);
 
-        nexusSettler.createPI(rootHash, signature, nonce, s, d, o);
+        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
+        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
 
         // Create 2-node path (pull -> deposit)
         INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](2);
@@ -783,7 +807,7 @@ contract SwapAaveGasProfiler is Test {
 
         vm.prank(fillerDag);
         uint256 gasStartDag = gasleft();
-        nexusSettler.processPIPath(rootHash, targetNodeHash, path);
+        _executeProcessPIPath(rootHash, targetNodeHash, path, s, d, o, nonce);
         uint256 gasDAG = gasStartDag - gasleft();
 
         // ============ COMPARISON OUTPUT ============
@@ -830,7 +854,8 @@ contract SwapAaveGasProfiler is Test {
         bytes memory signature = abi.encodePacked(r, s_sig, v);
 
         // 3. Call createPI
-        nexusSettler.createPI(rootHash, signature, nonce, s, d, o);
+        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
+        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
 
         // 4. Create IntendNode[] path with 5 connected nodes:
         // Node 0: Pull tokenA from filler to NexusSettler
@@ -899,7 +924,7 @@ contract SwapAaveGasProfiler is Test {
 
         vm.prank(fillerDag);
         uint256 gasStart = gasleft();
-        nexusSettler.processPIPath(rootHash, targetNodeHash, path);
+        _executeProcessPIPath(rootHash, targetNodeHash, path, s, d, o, nonce);
         uint256 gasUsed = gasStart - gasleft();
 
         // 6. Log results
@@ -977,7 +1002,8 @@ contract SwapAaveGasProfiler is Test {
         (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
         bytes memory signature = abi.encodePacked(r, s_sig, v);
 
-        nexusSettler.createPI(rootHash, signature, nonce, s, d, o);
+        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
+        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
 
         // Create 5-node path (pull -> approve -> swap -> approve -> deposit)
         INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](5);
@@ -1041,7 +1067,7 @@ contract SwapAaveGasProfiler is Test {
 
         vm.prank(fillerDag);
         uint256 gasStartDag = gasleft();
-        nexusSettler.processPIPath(rootHash, targetNodeHash, path);
+        _executeProcessPIPath(rootHash, targetNodeHash, path, s, d, o, nonce);
         uint256 gasDAG = gasStartDag - gasleft();
 
         // ============ COMPARISON OUTPUT ============

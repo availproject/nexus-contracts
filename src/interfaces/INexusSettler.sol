@@ -3,14 +3,11 @@ pragma solidity 0.8.26;
 
 /**
  * @title INexusSettler
- * @notice Interface for zero-storage DAG-based intent settlement
- * @dev All node data provided in calldata, only completion status stored
+ * @notice Zero-storage DAG-based intent settlement interface
+ * @dev Node data stays in calldata—only completion status hits storage.
  */
 interface INexusSettler {
-    /**
-     * @notice Action type enumeration for backward compatibility
-     * @dev Kept for IActionRouter compatibility
-     */
+    /// Kept for IActionRouter compatibility
     enum ActionType {
         PERMIT,
         PERMIT2,
@@ -20,10 +17,7 @@ interface INexusSettler {
         BRIDGE_AND_SWAP
     }
 
-    /**
-     * @notice Action struct for backward compatibility
-     * @dev Kept for IActionRouter compatibility
-     */
+    /// Kept for IActionRouter compatibility  
     struct Action {
         ActionType actionType;
         string target;
@@ -32,11 +26,11 @@ interface INexusSettler {
     }
 
     /**
-     * @notice IntendNode struct - execution node data
-     * @dev Provided in calldata, never stored on-chain
-     * @param next Index of next node in path (0 if end)
-     * @param target Contract address to call
-     * @param data Calldata to execute
+     * @notice Execution node data
+     * @dev Lives in calldata, never stored.
+     * @param next Index of next node (0 if terminal)
+     * @param target Contract to call
+     * @param data Calldata
      */
     struct IntendNode {
         bytes32 next;
@@ -44,75 +38,73 @@ interface INexusSettler {
         bytes data;
     }
 
-    /**
-     * @notice Invalid signature provided
-     */
+    /// Root node containing source, destination, and offchain intent roots
+    struct RootNode {
+        bytes32 s;  // source root
+        bytes32 d;  // destination root
+        bytes32 o;  // offchain intents root
+    }
+
+    /// Target type for distinguishing source vs destination
+    enum TargetType {
+        Source,
+        Destination
+    }
+
+    /// Target node with type and chain-to-node mapping
+    struct TargetNode {
+        TargetType targetType;
+        bytes chainIdToNode;  // <k:2><seed:2><chainId_0:2><hash_0:32>...
+    }
+
     error InvalidSignature();
-
-    /**
-     * @notice Intent already exists (root hash already used)
-     */
     error IntentAlreadyExists();
-
-    /**
-     * @notice Path already processed for this root and target type
-     */
     error PathAlreadyProcessed();
-
-    /**
-     * @notice Invalid root hash (commitment mismatch)
-     */
     error InvalidRootHash();
-
-    /**
-     * @notice Invalid path structure
-     */
     error InvalidPath();
-
-    /**
-     * @notice Empty path (no nodes to execute)
-     */
     error EmptyPath();
-
-    /**
-     * @notice Cycle detected in path
-     */
     error CycleDetected();
 
     /**
-     * @notice Chain ID in target data doesn't match current chain
-     * @param expected The expected chain ID (current chain)
-     * @param actual The actual chain ID found in the data
+     * @notice Chain ID mismatch in target data
+     * @param expected Current chain ID
+     * @param actual Chain ID found in data
      */
     error InvalidChainId(uint16 expected, uint16 actual);
 
+    /// Chain ID lookup miss in perfect hash table
+    error ChainIdNotFound(uint16 chainId);
+
+    error InvalidTargetFormat();
+    error InvalidTarget();
+
     /**
-     * @notice Emitted when a new Path Intent is created
-     * @param rootHash The root hash of the created intent
-     * @param signer The address that signed the intent
+     * @notice Intent created
+     * @param rootHash Commitment hash
+     * @param signer Address that signed
      */
     event PICreated(bytes32 indexed rootHash, address indexed signer);
 
     /**
-     * @notice Emitted when an IntendNode is executed
-     * @param nodeHash Hash of the executed node
-     * @param level Depth level in the path (0-indexed)
+     * @notice Node executed
+     * @param nodeHash Hash of executed node
+     * @param level Depth in path (0-indexed)
      */
     event IntendNodeExec(bytes32 indexed nodeHash, uint256 level);
 
     /**
-     * @notice Emitted when an IntendNode is skipped (already processed)
-     * @param nodeHash Hash of the skipped node
-     * @param level Depth level in the path (0-indexed)
+     * @notice Node skipped (already processed)
+     * @param nodeHash Hash of skipped node  
+     * @param level Depth in path (0-indexed)
      */
     event IntendNodeSkipped(bytes32 indexed nodeHash, uint256 level);
 
     /**
-     * @notice Emitted when a complete intent path is processed
-     * @param targetNodeHash Hash of the target that initiated the path
-     * @param lastNodeHash Hash of the final node executed
-     * @param graphRoot Root hash of the entire intent
-     * @param height Number of nodes executed in the path
+     * @notice Path processed (complete or partial)
+     * @param targetNodeHash Entry point hash
+     * @param lastNodeHash Final node executed
+     * @param graphRoot Root hash of intent
+     * @param height Nodes executed
      */
     event IntendPathProcessed(
         bytes32 indexed targetNodeHash,
@@ -122,58 +114,46 @@ interface INexusSettler {
     );
 
     /**
-     * @notice Creates a Path Intent with signature verification
-     * @dev Verifies commitment and signature, stores NOTHING
-     * @param rootHash Commitment hash = keccak256(s, d, o, nonce)
+     * @notice Creates a signed Path Intent
+     * @dev Verifies keccak256(rootNode, nonce) == rootHash.
+     * @param rootHash Commitment hash
      * @param signature EIP-712 signature of (rootHash, nonce)
-     * @param nonce Unique nonce to prevent rootHash collisions
-     * @param s Source target hash (provided, not stored)
-     * @param d Destination target hash (provided, not stored)
-     * @param o Offchain target hash (provided, not stored)
+     * @param nonce Prevents collision between identical rootNode values
+     * @param rootNode Source, destination, and offchain roots
      */
     function createPI(
         bytes32 rootHash,
         bytes calldata signature,
         uint256 nonce,
-        bytes32 s,
-        bytes32 d,
-        bytes32 o
+        RootNode calldata rootNode
     ) external;
 
     /**
-     * @notice Processes an intent path - PURE EXECUTION with partial support
-     * @dev Executes path from calldata, marks completion ONLY when reaching end
-     *      Partial execution: stops if next node not found, allows resuming
-     *      Node tracking: skips already-processed nodes, prevents re-execution
-     *      Source of truth for completion: IntendNode has next == bytes32(0)
-     * @param rootHash Root commitment hash
-     * @param targetNodeHash Target node hash (for replay protection key)
-     * @param path Array of IntendNodes to execute (from calldata)
+     * @notice Executes path with chain ID validation
+     * @dev Uses path[0] as entry node. Validates chain ID from targetNode.chainIdToNode
+     *      matches current chain, then verifies targetNodeHash and executes path.
+     * @param rootHash Root commitment
+     * @param targetNodeHash Must match extracted target from chainIdToNode
+     * @param path IntendNodes to execute (path[0] is entry node)
+     * @param targetNode Target type and chain-to-node mapping
+     * @param rootNode Source, destination, and offchain roots
+     * @param nonce From commitment
      */
     function processPIPath(
         bytes32 rootHash,
         bytes32 targetNodeHash,
-        IntendNode[] calldata path
+        IntendNode[] calldata path,
+        TargetNode calldata targetNode,
+        RootNode calldata rootNode,
+        uint256 nonce
     ) external;
 
-    /**
-     * @notice Check if a rootHash has been created
-     * @param rootHash The root hash to check
-     * @return created True if the intent has been created
-     */
+    /// Returns true if rootHash was created
     function created(bytes32 rootHash) external view returns (bool);
 
-    /**
-     * @notice Check if a (rootHash, targetNodeHash) pair has been completed
-     * @param completionKey The keccak256(rootHash, targetNodeHash) key
-     * @return completed True if the path has been executed
-     */
+    /// Returns true if (rootHash, targetNodeHash) completed
     function completed(bytes32 completionKey) external view returns (bool);
 
-    /**
-     * @notice Check if a specific IntendNode has been processed
-     * @param nodeKey The keccak256(rootHash, targetNodeHash, nodeHash) key
-     * @return processed True if the node has been executed
-     */
+    /// Returns true if IntendNode was processed
     function processedNodes(bytes32 nodeKey) external view returns (bool);
 }
