@@ -10,12 +10,16 @@ import {Actions} from "lib/v4-periphery/src/libraries/Actions.sol";
 import {IV4Router} from "lib/v4-periphery/src/interfaces/IV4Router.sol";
 import {SafeCast} from "lib/v4-core/src/libraries/SafeCast.sol";
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import {ReentrancyGuardTransient} from "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuardTransient.sol";
 import {IPermit2} from "@uniswap/permit2/src/interfaces/IPermit2.sol";
 import {Currency} from "lib/v4-core/src/types/Currency.sol";
 
 //Uses Uniswap Universal Router for executing swap commands.
 //Currently multihop swaps are not implemented, only exact in and exact out flows.
-contract UniswapV4Router is IActionRouter {
+/// @title UniswapV4Router
+/// @notice Router for executing Uniswap V4 swaps through the Universal Router
+/// @dev Protected against reentrancy attacks. Uses checks-effects-interactions pattern.
+contract UniswapV4Router is IActionRouter, ReentrancyGuardTransient {
     error InvalidPreviousData();
 
     UniversalRouter public immutable ROUTER;
@@ -38,6 +42,7 @@ contract UniswapV4Router is IActionRouter {
 
     function execute(INexusSettler.Action calldata action, bytes calldata previousData)
         external
+        nonReentrant
         returns (bytes memory)
     {
         if (action.actionType != INexusSettler.ActionType.SWAP) {
