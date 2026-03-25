@@ -13,7 +13,8 @@ import {INexusSettler} from "./interfaces/INexusSettler.sol";
  * @author Rachit Anand Srivastava (@privacy_prophet)
  * @dev All node data lives in calldata—only completion flags touch storage.
  *      Two mappings track state: created[rootHash] and intentStates[completionKey].
- *      IntentState packs completed flag and bitmap (248 nodes) into single slot.
+ *      IntentState packs completed + height + bitmap into slot 1, nextHash in slot 2.
+ *      True resumability: resumed calls only pass remaining nodes, not the full path.
  */
 contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
     using Address for address;
@@ -96,55 +97,58 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
         }
 
         bytes32 completionKey = keccak256(abi.encode(rootHash, computedTargetRootHash));
-        IntentState memory state = intentStates[completionKey]; // 1 SLOAD
+        IntentState memory state = intentStates[completionKey]; // 1 SLOAD (2 slots)
 
-        if (state.bitmap == 0) {
-            // Check empty path first before accessing path[0]
-            if (path.length == 0) revert EmptyPath();
-            bytes32 calculatedFirstNodeHash = keccak256(abi.encode(path[0]));
-            bytes32 firstNodeHash = _extractTargetHash(targetNode.chainIdToNode);
-            if (calculatedFirstNodeHash != firstNodeHash) revert InvalidPath();
-        }
-
+        if (path.length == 0) revert EmptyPath();
         if (state.completed) revert PathAlreadyProcessed();
 
-        (uint256 height, bool isComplete, bytes32 lastNodeHash, uint248 updatedBitmap) =
-            _executePath(state.bitmap, path);
+        bytes32 firstNodeHash = keccak256(abi.encode(path[0]));
 
-        intentStates[completionKey] =
-            IntentState({completed: isComplete, bitmap: updatedBitmap}); // 1 SSTORE
+        if (state.height == 0) {
+            // First call: validate path[0] against target's perfect hash table
+            bytes32 expectedHash = _extractTargetHash(targetNode.chainIdToNode);
+            if (firstNodeHash != expectedHash) revert InvalidPath();
+        } else {
+            // Resume: validate path[0] matches where we left off
+            if (firstNodeHash != state.nextHash) revert InvalidPath();
+        }
 
-        emit IntendPathProcessed(computedTargetRootHash, lastNodeHash, rootHash, height);
+        (uint8 endHeight, bool isComplete, bytes32 lastNodeHash, bytes32 nextHash, uint240 updatedBitmap) =
+            _executePath(state.height, state.bitmap, path);
+
+        intentStates[completionKey] = IntentState({
+            completed: isComplete,
+            height: endHeight,
+            bitmap: updatedBitmap,
+            nextHash: nextHash
+        }); // 1 SSTORE (2 slots)
+
+        emit IntendPathProcessed(computedTargetRootHash, lastNodeHash, rootHash, endHeight);
     }
 
     /**
      * @notice Executes IntendNode path from calldata using bitmap tracking
-     * @dev Traverses path following next pointers. For each node:
-     *      - Detect cycles via visited[] array
-     *      - Skip already-processed nodes (bitmap bit set)
-     *      - Execute unprocessed nodes and set bitmap bit
-     *      - Follow next pointer or stop if missing/terminal
-     *      Single SLOAD at start, single SSTORE at end — O(1) storage ops.
-     *      Node hashes are cached: the next-pointer verification hash from
-     *      iteration N is reused as the nodeHash in iteration N+1.
-     * @return height Nodes executed (including skipped)
-     * @return isComplete True if reached terminal (next == 0)
-     * @return lastNodeHash Hash of last executed/skipped node
+     * @dev On first call startHeight=0; on resume startHeight=stored height.
+     *      Only new nodes are passed—no re-traversal of already-processed nodes.
+     *      Bitmap bits correspond to absolute height positions.
+     * @param startHeight Height offset (0 on first call, stored height on resume)
+     * @param currentBitmap Bitmap from previous execution (0 on first call)
+     * @param path IntendNodes to execute (only unprocessed nodes)
+     * @return endHeight Total nodes processed across all calls
+     * @return isComplete True if reached terminal (next == bytes32(0))
+     * @return lastNodeHash Hash of last node processed
+     * @return nextHash Expected hash of path[0] for next resume (0 if complete)
+     * @return updatedBitmap Updated bitmap with new nodes marked
      */
-    function _executePath(uint248 currentBitmap, IntendNode[] calldata path)
+    function _executePath(uint8 startHeight, uint240 currentBitmap, IntendNode[] calldata path)
         private
-        returns (uint256 height, bool isComplete, bytes32 lastNodeHash, uint248 updatedBitmap)
+        returns (uint8 endHeight, bool isComplete, bytes32 lastNodeHash, bytes32 nextHash, uint240 updatedBitmap)
     {
         uint256 currentIdx = 0;
-        bytes32 nodeHash = keccak256(abi.encode(path[0]));
-
+        uint256 height = startHeight;
         uint256 bitmap = currentBitmap;
-
-        // Note: Cycle detection not required. Infinite loops are prevented by:
-        // 1. MAX_PATH_LENGTH limiting iterations to 100
-        // 2. Gas limit - any circular path would exhaust gas and fail the transaction
-        // 3. The next-pointer chain must eventually reach bytes32(0) or path end
         uint256 pathLen = path.length;
+
         while (currentIdx < pathLen) {
             if (height >= MAX_PATH_LENGTH) revert InvalidPath();
 
@@ -153,15 +157,11 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
             if (node.target == address(0)) revert InvalidPath();
 
             unchecked {
-                uint256 bit = 1 << height;
-                if ((bitmap & bit) == 0) {
-                    bitmap |= bit;
-                    _executeAction(node.target, node.data);
-                }
-
+                bitmap |= (1 << height);
                 height++;
             }
-            lastNodeHash = nodeHash;
+            _executeAction(node.target, node.data);
+            lastNodeHash = keccak256(abi.encode(node));
 
             if (node.next == bytes32(0)) {
                 isComplete = true;
@@ -170,20 +170,17 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
 
             if (currentIdx + 1 < pathLen) {
                 bytes32 nextNodeHash = keccak256(abi.encode(path[currentIdx + 1]));
-                if (nextNodeHash == node.next) {
-                    nodeHash = nextNodeHash;
-                    unchecked { ++currentIdx; }
-                } else {
-                    isComplete = false;
-                    break;
-                }
+                if (nextNodeHash != node.next) revert InvalidPath();
+                unchecked { ++currentIdx; }
             } else {
-                isComplete = false;
+                // Ran out of nodes — store next expected hash for resume
+                nextHash = node.next;
                 break;
             }
         }
 
-        updatedBitmap = uint248(bitmap);
+        endHeight = uint8(height);
+        updatedBitmap = uint240(bitmap);
     }
 
     /**

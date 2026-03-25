@@ -35,22 +35,32 @@ contract NexusSettlerTest is Test {
         return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
     }
 
+    /// Etches minimal runtime code at an address so Address.functionCall succeeds
+    function _etchDummy(address target) internal {
+        // STOP opcode — accepts any call, returns nothing
+        vm.etch(target, hex"00");
+    }
+
     /// Creates single-node test path
-    function _createTestPath() internal pure returns (INexusSettler.IntendNode[] memory) {
+    function _createTestPath() internal returns (INexusSettler.IntendNode[] memory) {
+        address target = address(0x1234);
+        _etchDummy(target);
         INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](1);
         path[0] = INexusSettler.IntendNode({
-            next: bytes32(0), target: address(0x1234), data: abi.encodeWithSignature("dummy()")
+            next: bytes32(0), target: target, data: abi.encodeWithSignature("dummy()")
         });
         return path;
     }
 
     /// Creates multi-node path with linked next pointers
-    function _createMultiNodePath(uint256 count) internal pure returns (INexusSettler.IntendNode[] memory) {
+    function _createMultiNodePath(uint256 count) internal returns (INexusSettler.IntendNode[] memory) {
         INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](count);
         for (uint256 i = 0; i < count; i++) {
+            address target = address(uint160(0x1000 + i));
+            _etchDummy(target);
             path[i] = INexusSettler.IntendNode({
                 next: i + 1 < count ? keccak256(abi.encode(path[i + 1])) : bytes32(0),
-                target: address(uint160(0x1000 + i)),
+                target: target,
                 data: abi.encodeWithSignature("action%i()", i)
             });
         }
@@ -229,7 +239,7 @@ contract NexusSettlerTest is Test {
         // 4. Execute with validation
         nexusSettler.processPIPath(rootHash, rootNode, targetNode, path, nonce, true);
 
-        (bool isComplete,) = nexusSettler.intentStates(_getCompletionKey(rootHash, computedTargetHash));
+        (bool isComplete,,,) = nexusSettler.intentStates(_getCompletionKey(rootHash, computedTargetHash));
         assertTrue(isComplete, "Should complete");
     }
 

@@ -40,10 +40,13 @@ interface INexusSettler {
     }
 
     /// @notice Packed intent state per completion key
-    /// @dev Uses uint248 for bitmap to pack with bool in single slot
+    /// @dev Slot 1: completed (1) + height (1) + bitmap (30) = 32 bytes
+    ///      Slot 2: nextHash (32 bytes) — expected hash of path[0] on resume
     struct IntentState {
         bool completed;
-        uint248 bitmap;
+        uint8 height;
+        uint240 bitmap;
+        bytes32 nextHash;
     }
 
     error InvalidSignature();
@@ -116,7 +119,8 @@ interface INexusSettler {
     function created(bytes32 rootHash) external view returns (bool);
 
     /// Returns intent state for a completion key
-    /// @return completed Whether the path is complete
-    /// @return bitmap Processed node bitmap (248 bits)
-    function intentStates(bytes32 completionKey) external view returns (bool completed, uint248 bitmap);
+    function intentStates(bytes32 completionKey)
+        external
+        view
+        returns (bool completed, uint8 height, uint240 bitmap, bytes32 nextHash);
 }
