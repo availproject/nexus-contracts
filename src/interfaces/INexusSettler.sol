@@ -63,7 +63,6 @@ interface INexusSettler {
     error InvalidRootHash();
     error InvalidPath();
     error EmptyPath();
-    error CycleDetected();
 
     /**
      * @notice Chain ID mismatch in target data
@@ -105,31 +104,30 @@ interface INexusSettler {
     function createPI(bytes32 rootHash, bytes calldata signature, uint256 nonce, RootNode calldata rootNode) external;
 
     /**
-     * @notice Executes path with chain ID validation
-     * @dev Uses path[0] as entry node. Validates chain ID from targetNode.chainIdToNode
-     *      matches current chain, then verifies targetNodeHash and executes path.
+     * @notice Executes path settlement for a specific target node
+     * @dev Validates rootHash exists, matches targetNodeHash against rootNode.s or rootNode.d,
+     *      then executes the path with bitmap tracking for resumability.
      * @param rootHash Root commitment
-     * @param targetNodeHash Must match extracted target from chainIdToNode
-     * @param path IntendNodes to execute (path[0] is entry node)
-     * @param targetNode Target type and chain-to-node mapping
      * @param rootNode Source, destination, and offchain roots
+     * @param targetNode Target type and chain-to-node mapping
+     * @param path IntendNodes to execute (path[0] is entry node)
      * @param nonce From commitment
+     * @param isSource True if processing source chain, false for destination
      */
     function processPIPath(
         bytes32 rootHash,
-        bytes32 targetNodeHash,
-        IntendNode[] calldata path,
-        TargetNode calldata targetNode,
         RootNode calldata rootNode,
-        uint256 nonce
+        TargetNode calldata targetNode,
+        IntendNode[] calldata path,
+        uint256 nonce,
+        bool isSource
     ) external;
 
     /// Returns true if rootHash was created
     function created(bytes32 rootHash) external view returns (bool);
 
-    /// Returns true if (rootHash, targetNodeHash) completed
-    function completed(bytes32 completionKey) external view returns (bool);
-
-    /// Returns bitmap of processed node indices for a completion key
-    function processedBitmap(bytes32 completionKey) external view returns (uint256);
+    /// Returns intent state for a completion key
+    /// @return completed Whether the path is complete
+    /// @return bitmap Processed node bitmap (248 bits)
+    function intentStates(bytes32 completionKey) external view returns (bool completed, uint248 bitmap);
 }

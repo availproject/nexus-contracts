@@ -62,11 +62,7 @@ contract DirectSwapAaveExecutor {
      * @notice Deposit only: pull tokens from caller, approve, deposit to Aave
      * @dev Same flow as DAG (pull → approve → supply) without swap
      */
-    function depositOnly(
-        address token,
-        uint256 amount,
-        address beneficiary
-    ) external returns (bool success) {
+    function depositOnly(address token, uint256 amount, address beneficiary) external returns (bool success) {
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         IERC20(token).approve(address(AAVE_POOL), amount);
         AAVE_POOL.supply(token, amount, beneficiary, 0);

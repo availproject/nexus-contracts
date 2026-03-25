@@ -204,10 +204,20 @@ contract NexusSettlerTest is Test {
     // ============================================================================
 
     function testProcessPIPath_Success() public {
-        // Create RootNode and intent
-        INexusSettler.RootNode memory rootNode =
-            _createRootNode(keccak256("source"), keccak256("destination"), keccak256("offchain"));
         uint256 nonce = 1;
+
+        // 1. Create path first to get entry node hash
+        INexusSettler.IntendNode[] memory path = _createTestPath();
+        bytes32 entryNodeHash = keccak256(abi.encode(path[0]));
+
+        // 2. Create TargetNode with entry node hash
+        INexusSettler.TargetNode memory targetNode =
+            _createSingleTargetNode(INexusSettler.TargetType.Source, uint16(block.chainid), entryNodeHash);
+
+        // 3. Create RootNode with targetNode hash as source
+        bytes32 computedTargetHash = keccak256(abi.encode(targetNode));
+        INexusSettler.RootNode memory rootNode =
+            _createRootNode(computedTargetHash, keccak256("destination"), keccak256("offchain"));
         bytes32 rootHash = keccak256(abi.encode(rootNode, nonce));
 
         bytes32 structHash =
@@ -216,79 +226,84 @@ contract NexusSettlerTest is Test {
         (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(userPrivateKey, digest);
         nexusSettler.createPI(rootHash, abi.encodePacked(r, s_sig, v), nonce, rootNode);
 
-        // Create TargetNode for source (path[0] will be entry node)
-        bytes32 targetNodeHash = _getTargetNodeHash(rootHash, true);
-        INexusSettler.TargetNode memory targetNode =
-            _createSingleTargetNode(INexusSettler.TargetType.Source, uint16(block.chainid), targetNodeHash);
+        // 4. Execute with validation
+        nexusSettler.processPIPath(rootHash, rootNode, targetNode, path, nonce, true);
 
-        // Create path - path[0] is entry node
-        INexusSettler.IntendNode[] memory path = _createTestPath();
-
-        // Execute with validation
-        nexusSettler.processPIPath(rootHash, targetNodeHash, path, targetNode, rootNode, nonce);
-
-        assertTrue(nexusSettler.completed(_getCompletionKey(rootHash, targetNodeHash)), "Should complete");
+        (bool isComplete,) = nexusSettler.intentStates(_getCompletionKey(rootHash, computedTargetHash));
+        assertTrue(isComplete, "Should complete");
     }
 
     function testProcessPIPath_InvalidChainId() public {
-        // Create RootNode and intent
-        INexusSettler.RootNode memory rootNode =
-            _createRootNode(keccak256("source"), keccak256("destination"), keccak256("offchain"));
         uint256 nonce = 1;
-        bytes32 rootHash = keccak256(abi.encode(rootNode, nonce));
 
-        bytes32 structHash =
-            keccak256(abi.encode(keccak256("NexusPI(bytes32 rootHash,uint256 nonce)"), rootHash, nonce));
-        bytes32 digest = _computeDigest(structHash);
-        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(userPrivateKey, digest);
-        nexusSettler.createPI(rootHash, abi.encodePacked(r, s_sig, v), nonce, rootNode);
-
-        // Create TargetNode with WRONG chain ID
-        bytes32 targetNodeHash = _getTargetNodeHash(rootHash, true);
+        // Create TargetNode with WRONG chain ID first
+        bytes32 targetNodeHash = _getTargetNodeHash(keccak256("temp"), true);
         INexusSettler.TargetNode memory targetNode = _createSingleTargetNode(
             INexusSettler.TargetType.Source,
             999, // Wrong chain ID
             targetNodeHash
         );
 
+        // Create RootNode with targetNode hash as source
+        bytes32 computedTargetHash = keccak256(abi.encode(targetNode));
+        INexusSettler.RootNode memory rootNode =
+            _createRootNode(computedTargetHash, keccak256("destination"), keccak256("offchain"));
+        bytes32 rootHash = keccak256(abi.encode(rootNode, nonce));
+
+        bytes32 structHash =
+            keccak256(abi.encode(keccak256("NexusPI(bytes32 rootHash,uint256 nonce)"), rootHash, nonce));
+        bytes32 digest = _computeDigest(structHash);
+        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(userPrivateKey, digest);
+        nexusSettler.createPI(rootHash, abi.encodePacked(r, s_sig, v), nonce, rootNode);
+
         INexusSettler.IntendNode[] memory path = _createTestPath();
 
         // Should revert with ChainIdNotFound
         vm.expectRevert(abi.encodeWithSelector(INexusSettler.ChainIdNotFound.selector, uint16(block.chainid)));
-        nexusSettler.processPIPath(rootHash, targetNodeHash, path, targetNode, rootNode, nonce);
+        nexusSettler.processPIPath(rootHash, rootNode, targetNode, path, nonce, true);
     }
 
     function testProcessPIPath_WrongTarget() public {
-        // Create RootNode and intent
-        INexusSettler.RootNode memory rootNode =
-            _createRootNode(keccak256("source"), keccak256("destination"), keccak256("offchain"));
         uint256 nonce = 1;
-        bytes32 rootHash = keccak256(abi.encode(rootNode, nonce));
 
-        bytes32 structHash =
-            keccak256(abi.encode(keccak256("NexusPI(bytes32 rootHash,uint256 nonce)"), rootHash, nonce));
-        bytes32 digest = _computeDigest(structHash);
-        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(userPrivateKey, digest);
-        nexusSettler.createPI(rootHash, abi.encodePacked(r, s_sig, v), nonce, rootNode);
-
-        // Create TargetNode with correct chain ID but WRONG target hash
+        // Create a targetNode with WRONG target hash first
         bytes32 wrongTargetHash = keccak256("wrong");
         INexusSettler.TargetNode memory targetNode =
             _createSingleTargetNode(INexusSettler.TargetType.Source, uint16(block.chainid), wrongTargetHash);
 
-        bytes32 targetNodeHash = _getTargetNodeHash(rootHash, true);
+        // Create RootNode with DIFFERENT source hash (mismatched from targetNode)
+        INexusSettler.RootNode memory rootNode =
+            _createRootNode(keccak256("different_source"), keccak256("destination"), keccak256("offchain"));
+        bytes32 rootHash = keccak256(abi.encode(rootNode, nonce));
+
+        bytes32 structHash =
+            keccak256(abi.encode(keccak256("NexusPI(bytes32 rootHash,uint256 nonce)"), rootHash, nonce));
+        bytes32 digest = _computeDigest(structHash);
+        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(userPrivateKey, digest);
+        nexusSettler.createPI(rootHash, abi.encodePacked(r, s_sig, v), nonce, rootNode);
+
         INexusSettler.IntendNode[] memory path = _createTestPath();
 
-        // Should revert with InvalidTarget
+        // Should revert with InvalidTarget because rootNode.s != keccak256(abi.encode(targetNode))
         vm.expectRevert(INexusSettler.InvalidTarget.selector);
-        nexusSettler.processPIPath(rootHash, targetNodeHash, path, targetNode, rootNode, nonce);
+        nexusSettler.processPIPath(rootHash, rootNode, targetNode, path, nonce, true);
     }
 
     function testProcessPIPath_AlreadyCompleted() public {
-        // Create RootNode and intent
-        INexusSettler.RootNode memory rootNode =
-            _createRootNode(keccak256("source"), keccak256("destination"), keccak256("offchain"));
         uint256 nonce = 1;
+
+        // 1. Create path first to get entry node hash
+        INexusSettler.IntendNode[] memory path = _createTestPath();
+        bytes32 entryNodeHash = keccak256(abi.encode(path[0]));
+
+        // 2. Create TargetNode with entry node hash
+        INexusSettler.TargetNode memory targetNode =
+            _createSingleTargetNode(INexusSettler.TargetType.Source, uint16(block.chainid), entryNodeHash);
+
+        // 3. Create RootNode with targetNode hash as source
+        bytes32 computedTargetHash = keccak256(abi.encode(targetNode));
+        INexusSettler.RootNode memory rootNode =
+            _createRootNode(computedTargetHash, keccak256("destination"), keccak256("offchain"));
         bytes32 rootHash = keccak256(abi.encode(rootNode, nonce));
 
         bytes32 structHash =
@@ -297,24 +312,26 @@ contract NexusSettlerTest is Test {
         (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(userPrivateKey, digest);
         nexusSettler.createPI(rootHash, abi.encodePacked(r, s_sig, v), nonce, rootNode);
 
-        // Create TargetNode and execute once
-        bytes32 targetNodeHash = _getTargetNodeHash(rootHash, true);
-        INexusSettler.TargetNode memory targetNode =
-            _createSingleTargetNode(INexusSettler.TargetType.Source, uint16(block.chainid), targetNodeHash);
-
-        INexusSettler.IntendNode[] memory path = _createTestPath();
-        nexusSettler.processPIPath(rootHash, targetNodeHash, path, targetNode, rootNode, nonce);
+        // 4. Execute first time
+        nexusSettler.processPIPath(rootHash, rootNode, targetNode, path, nonce, true);
 
         // Second call should revert
         vm.expectRevert(INexusSettler.PathAlreadyProcessed.selector);
-        nexusSettler.processPIPath(rootHash, targetNodeHash, path, targetNode, rootNode, nonce);
+        nexusSettler.processPIPath(rootHash, rootNode, targetNode, path, nonce, true);
     }
 
     function testProcessPIPath_EmptyPath() public {
-        // Create RootNode and intent
-        INexusSettler.RootNode memory rootNode =
-            _createRootNode(keccak256("source"), keccak256("destination"), keccak256("offchain"));
         uint256 nonce = 1;
+
+        // Create TargetNode first
+        bytes32 targetNodeHash = _getTargetNodeHash(keccak256("temp"), true);
+        INexusSettler.TargetNode memory targetNode =
+            _createSingleTargetNode(INexusSettler.TargetType.Source, uint16(block.chainid), targetNodeHash);
+
+        // Create RootNode with targetNode hash as source
+        bytes32 computedTargetHash = keccak256(abi.encode(targetNode));
+        INexusSettler.RootNode memory rootNode =
+            _createRootNode(computedTargetHash, keccak256("destination"), keccak256("offchain"));
         bytes32 rootHash = keccak256(abi.encode(rootNode, nonce));
 
         bytes32 structHash =
@@ -322,14 +339,10 @@ contract NexusSettlerTest is Test {
         bytes32 digest = _computeDigest(structHash);
         (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(userPrivateKey, digest);
         nexusSettler.createPI(rootHash, abi.encodePacked(r, s_sig, v), nonce, rootNode);
-
-        bytes32 targetNodeHash = _getTargetNodeHash(rootHash, true);
-        INexusSettler.TargetNode memory targetNode =
-            _createSingleTargetNode(INexusSettler.TargetType.Source, uint16(block.chainid), targetNodeHash);
 
         INexusSettler.IntendNode[] memory emptyPath = new INexusSettler.IntendNode[](0);
 
         vm.expectRevert(INexusSettler.EmptyPath.selector);
-        nexusSettler.processPIPath(rootHash, targetNodeHash, emptyPath, targetNode, rootNode, nonce);
+        nexusSettler.processPIPath(rootHash, rootNode, targetNode, emptyPath, nonce, true);
     }
 }

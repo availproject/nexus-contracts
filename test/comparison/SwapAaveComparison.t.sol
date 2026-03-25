@@ -175,20 +175,18 @@ contract SwapAaveComparison is Test {
         return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
     }
 
-    /// @notice Helper to execute processPIPath with validation
-    function _executeProcessPIPath(
-        bytes32 rootHash,
-        bytes32 targetNodeHash,
+    /// @notice Helper to execute full DAG flow: createPI + processPIPath
+    /// @dev Creates targetNode from entryNodeHash, computes proper rootNode.d, 
+    ///      creates intent, and processes the path
+    function _executeFullDAGFlow(
+        bytes32 entryNodeHash,
         INexusSettler.IntendNode[] memory path,
         bytes32 s,
-        bytes32 d,
         bytes32 o,
-        uint256 nonce
+        uint256 nonce,
+        uint256 fillerPrivateKey
     ) internal {
-        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
-
-        // Build proper chainIdToNode data for single chain (k=1)
-        // Format: <k:2><seed:2><chainId:2><hash:32>
+        // Build targetNode from entryNodeHash
         bytes memory chainIdToNode = new bytes(38);
         chainIdToNode[0] = bytes1(uint8(0)); // k = 1 (high byte)
         chainIdToNode[1] = bytes1(uint8(1)); // k = 1 (low byte)
@@ -196,18 +194,61 @@ contract SwapAaveComparison is Test {
         chainIdToNode[3] = bytes1(uint8(0)); // seed = 0 (low byte)
         chainIdToNode[4] = bytes1(uint8(uint16(block.chainid) >> 8)); // chainId (high byte)
         chainIdToNode[5] = bytes1(uint8(uint16(block.chainid))); // chainId (low byte)
-        // Copy targetNodeHash as the hash (32 bytes)
         for (uint256 i = 0; i < 32; i++) {
-            chainIdToNode[6 + i] = targetNodeHash[i];
+            chainIdToNode[6 + i] = entryNodeHash[i];
         }
 
         INexusSettler.TargetNode memory targetNode =
             INexusSettler.TargetNode({targetType: INexusSettler.TargetType.Destination, chainIdToNode: chainIdToNode});
 
-        // targetNodeHash must equal keccak256(abi.encode(targetNode))
-        bytes32 computedTargetNodeHash = keccak256(abi.encode(targetNode));
+        // Compute d = keccak256(abi.encode(targetNode)) for validation
+        bytes32 d = keccak256(abi.encode(targetNode));
 
-        nexusSettler.processPIPath(rootHash, computedTargetNodeHash, path, targetNode, rootNode, nonce);
+        // Create rootNode with computed d
+        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
+
+        // Compute rootHash using correct struct encoding
+        bytes32 rootHash = keccak256(abi.encode(rootNode, nonce));
+
+        // Generate and verify signature
+        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
+        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
+        bytes32 digest = _computeDigest(structHash);
+        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s_sig, v);
+
+        // Create intent
+        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
+
+        // Process path
+        nexusSettler.processPIPath(rootHash, rootNode, targetNode, path, nonce, false);
+    }
+
+    /// @notice Helper to execute processPIPath only (for already-created intents)
+    /// @dev Uses pre-computed rootNode with correct d value
+    function _executeProcessPIPath(
+        bytes32 rootHash,
+        INexusSettler.RootNode memory rootNode,
+        bytes32 entryNodeHash,
+        INexusSettler.IntendNode[] memory path,
+        uint256 nonce
+    ) internal {
+        // Build targetNode from entryNodeHash
+        bytes memory chainIdToNode = new bytes(38);
+        chainIdToNode[0] = bytes1(uint8(0));
+        chainIdToNode[1] = bytes1(uint8(1));
+        chainIdToNode[2] = bytes1(uint8(0));
+        chainIdToNode[3] = bytes1(uint8(0));
+        chainIdToNode[4] = bytes1(uint8(uint16(block.chainid) >> 8));
+        chainIdToNode[5] = bytes1(uint8(uint16(block.chainid)));
+        for (uint256 i = 0; i < 32; i++) {
+            chainIdToNode[6 + i] = entryNodeHash[i];
+        }
+
+        INexusSettler.TargetNode memory targetNode =
+            INexusSettler.TargetNode({targetType: INexusSettler.TargetType.Destination, chainIdToNode: chainIdToNode});
+
+        nexusSettler.processPIPath(rootHash, rootNode, targetNode, path, nonce, false);
     }
 
     /// @notice Count execution steps by counting IntendNodeExec events
@@ -293,25 +334,12 @@ contract SwapAaveComparison is Test {
         tokenB.approve(address(nexusSettler), type(uint256).max);
         vm.stopPrank();
 
-        // 2. Create rootHash, signature, nonce for createPI
+        // 2. Setup root node parameters (d will be computed from targetNode)
         bytes32 s = keccak256("source");
-        bytes32 d = keccak256("destination");
         bytes32 o = keccak256("offchain");
         uint256 nonce = 1;
-        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
 
-        // Generate EIP-712 signature
-        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
-        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
-        bytes32 digest = _computeDigest(structHash);
-        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
-        bytes memory signature = abi.encodePacked(r, s_sig, v);
-
-        // 3. Call createPI
-        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
-        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
-
-        // 4. Create IntendNode[] path with 5 connected nodes:
+        // 3. Create IntendNode[] path with 5 connected nodes:
         // Node 0: Pull tokens from filler to NexusSettler
         // Node 1: Approve pool manager to spend NexusSettler's tokens
         // Node 2: Swap tokenA for tokenB
@@ -380,8 +408,27 @@ contract SwapAaveComparison is Test {
 
         vm.prank(fillerDag);
         uint256 gasStart = gasleft();
-        _executeProcessPIPath(rootHash, entryNodeHash, path, s, d, o, nonce);
+        _executeFullDAGFlow(entryNodeHash, path, s, o, nonce, fillerDagPrivateKey);
         uint256 gasUsed = gasStart - gasleft();
+
+        // 5b. Compute rootHash for verification (same as _executeFullDAGFlow)
+        bytes memory chainIdToNodeRoot = new bytes(38);
+        chainIdToNodeRoot[0] = bytes1(uint8(0));
+        chainIdToNodeRoot[1] = bytes1(uint8(1));
+        chainIdToNodeRoot[2] = bytes1(uint8(0));
+        chainIdToNodeRoot[3] = bytes1(uint8(0));
+        chainIdToNodeRoot[4] = bytes1(uint8(uint16(block.chainid) >> 8));
+        chainIdToNodeRoot[5] = bytes1(uint8(uint16(block.chainid)));
+        for (uint256 i = 0; i < 32; i++) {
+            chainIdToNodeRoot[6 + i] = entryNodeHash[i];
+        }
+        INexusSettler.TargetNode memory targetNodeRoot = INexusSettler.TargetNode({
+            targetType: INexusSettler.TargetType.Destination,
+            chainIdToNode: chainIdToNodeRoot
+        });
+        bytes32 d = keccak256(abi.encode(targetNodeRoot));
+        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
+        bytes32 rootHash = keccak256(abi.encode(rootNode, nonce));
 
         // 6. Log results with execution step count
         uint256 stepCount = _countExecutionSteps(path);
@@ -390,23 +437,10 @@ contract SwapAaveComparison is Test {
         console2.log("Node Traversal Count:", stepCount);
 
         // 7. Verify state
-        bytes memory chainIdToNodeVerify = new bytes(38);
-        chainIdToNodeVerify[0] = bytes1(uint8(0));
-        chainIdToNodeVerify[1] = bytes1(uint8(1));
-        chainIdToNodeVerify[2] = bytes1(uint8(0));
-        chainIdToNodeVerify[3] = bytes1(uint8(0));
-        chainIdToNodeVerify[4] = bytes1(uint8(uint16(block.chainid) >> 8));
-        chainIdToNodeVerify[5] = bytes1(uint8(uint16(block.chainid)));
-        for (uint256 i = 0; i < 32; i++) {
-            chainIdToNodeVerify[6 + i] = entryNodeHash[i];
-        }
-        INexusSettler.TargetNode memory targetNodeVerify = INexusSettler.TargetNode({
-            targetType: INexusSettler.TargetType.Destination,
-            chainIdToNode: chainIdToNodeVerify
-        });
-        bytes32 computedTargetNodeHash = keccak256(abi.encode(targetNodeVerify));
+        bytes32 computedTargetNodeHash = keccak256(abi.encode(targetNodeRoot));
         bytes32 completionKey = keccak256(abi.encode(rootHash, computedTargetNodeHash));
-        assertTrue(nexusSettler.completed(completionKey), "Path should be completed");
+        (bool isComplete,) = nexusSettler.intentStates(completionKey);
+        assertTrue(isComplete, "Path should be completed");
 
         // Verify filler has aTokens
         uint256 aTokenBalance = mockAToken.balanceOf(fillerDag);
@@ -459,23 +493,12 @@ contract SwapAaveComparison is Test {
         tokenA.approve(address(nexusSettler), type(uint256).max);
         vm.stopPrank();
 
-        // Create intent
+        // 2. Setup root node parameters (d will be computed from targetNode)
         bytes32 s = keccak256("source");
-        bytes32 d = keccak256("destination");
         bytes32 o = keccak256("offchain");
         uint256 nonce = 1;
-        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
 
-        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
-        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
-        bytes32 digest = _computeDigest(structHash);
-        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
-        bytes memory signature = abi.encodePacked(r, s_sig, v);
-
-        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
-        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
-
-        // Create 5-node path (same as DAG test)
+        // 3. Create 5-node path (same as DAG test)
         INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](5);
 
         // Node 4: Deposit
@@ -539,7 +562,7 @@ contract SwapAaveComparison is Test {
 
         vm.prank(fillerDag);
         uint256 gasStartDag = gasleft();
-        _executeProcessPIPath(rootHash, entryNodeHash, path, s, d, o, nonce);
+        _executeFullDAGFlow(entryNodeHash, path, s, o, nonce, fillerDagPrivateKey);
         uint256 gasDAG = gasStartDag - gasleft();
 
         // ============ COMPARISON OUTPUT ============
@@ -622,25 +645,12 @@ contract SwapAaveComparison is Test {
         tokenB.approve(address(nexusSettler), type(uint256).max);
         vm.stopPrank();
 
-        // 2. Create rootHash, signature, nonce for createPI
+        // 2. Setup root node parameters (d will be computed from targetNode)
         bytes32 s = keccak256("source_deposit_only");
-        bytes32 d = keccak256("destination_deposit_only");
         bytes32 o = keccak256("offchain_deposit_only");
         uint256 nonce = 2;
-        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
 
-        // Generate EIP-712 signature
-        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
-        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
-        bytes32 digest = _computeDigest(structHash);
-        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
-        bytes memory signature = abi.encodePacked(r, s_sig, v);
-
-        // 3. Call createPI
-        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
-        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
-
-        // 4. Create IntendNode[] path with 3 connected nodes:
+        // 3. Create IntendNode[] path with 3 connected nodes:
         // Node 0: Pull tokenB from filler to NexusSettler
         // Node 1: Approve Aave pool to spend tokenB
         // Node 2: Deposit tokenB to Aave
@@ -678,8 +688,27 @@ contract SwapAaveComparison is Test {
 
         vm.prank(fillerDag);
         uint256 gasStart = gasleft();
-        _executeProcessPIPath(rootHash, entryNodeHash, path, s, d, o, nonce);
+        _executeFullDAGFlow(entryNodeHash, path, s, o, nonce, fillerDagPrivateKey);
         uint256 gasUsed = gasStart - gasleft();
+
+        // 5b. Compute rootHash for verification (same as _executeFullDAGFlow)
+        bytes memory chainIdToNodeRoot = new bytes(38);
+        chainIdToNodeRoot[0] = bytes1(uint8(0));
+        chainIdToNodeRoot[1] = bytes1(uint8(1));
+        chainIdToNodeRoot[2] = bytes1(uint8(0));
+        chainIdToNodeRoot[3] = bytes1(uint8(0));
+        chainIdToNodeRoot[4] = bytes1(uint8(uint16(block.chainid) >> 8));
+        chainIdToNodeRoot[5] = bytes1(uint8(uint16(block.chainid)));
+        for (uint256 i = 0; i < 32; i++) {
+            chainIdToNodeRoot[6 + i] = entryNodeHash[i];
+        }
+        INexusSettler.TargetNode memory targetNodeRoot = INexusSettler.TargetNode({
+            targetType: INexusSettler.TargetType.Destination,
+            chainIdToNode: chainIdToNodeRoot
+        });
+        bytes32 d = keccak256(abi.encode(targetNodeRoot));
+        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
+        bytes32 rootHash = keccak256(abi.encode(rootNode, nonce));
 
         // 6. Log results with execution step count
         uint256 stepCount = _countExecutionSteps(path);
@@ -688,23 +717,10 @@ contract SwapAaveComparison is Test {
         console2.log("Node Traversal Count:", stepCount);
 
         // 7. Verify state
-        bytes memory chainIdToNodeVerify = new bytes(38);
-        chainIdToNodeVerify[0] = bytes1(uint8(0));
-        chainIdToNodeVerify[1] = bytes1(uint8(1));
-        chainIdToNodeVerify[2] = bytes1(uint8(0));
-        chainIdToNodeVerify[3] = bytes1(uint8(0));
-        chainIdToNodeVerify[4] = bytes1(uint8(uint16(block.chainid) >> 8));
-        chainIdToNodeVerify[5] = bytes1(uint8(uint16(block.chainid)));
-        for (uint256 i = 0; i < 32; i++) {
-            chainIdToNodeVerify[6 + i] = entryNodeHash[i];
-        }
-        INexusSettler.TargetNode memory targetNodeVerify = INexusSettler.TargetNode({
-            targetType: INexusSettler.TargetType.Destination,
-            chainIdToNode: chainIdToNodeVerify
-        });
-        bytes32 computedTargetNodeHash = keccak256(abi.encode(targetNodeVerify));
+        bytes32 computedTargetNodeHash = keccak256(abi.encode(targetNodeRoot));
         bytes32 completionKey = keccak256(abi.encode(rootHash, computedTargetNodeHash));
-        assertTrue(nexusSettler.completed(completionKey), "Path should be completed");
+        (bool isComplete,) = nexusSettler.intentStates(completionKey);
+        assertTrue(isComplete, "Path should be completed");
 
         // Verify filler has aTokens
         uint256 aTokenBalance = mockAToken.balanceOf(fillerDag);
@@ -755,23 +771,12 @@ contract SwapAaveComparison is Test {
         tokenB.approve(address(nexusSettler), type(uint256).max);
         vm.stopPrank();
 
-        // Create intent
+        // 2. Setup root node parameters (d will be computed from targetNode)
         bytes32 s = keccak256("source_comparison");
-        bytes32 d = keccak256("destination_comparison");
         bytes32 o = keccak256("offchain_comparison");
         uint256 nonce = 3;
-        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
 
-        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
-        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
-        bytes32 digest = _computeDigest(structHash);
-        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
-        bytes memory signature = abi.encodePacked(r, s_sig, v);
-
-        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
-        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
-
-        // Create 3-node path (pull -> approve aave -> deposit)
+        // 3. Create 3-node path (pull -> approve aave -> deposit)
         INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](3);
 
         // Node 2: Deposit
@@ -806,7 +811,7 @@ contract SwapAaveComparison is Test {
 
         vm.prank(fillerDag);
         uint256 gasStartDag = gasleft();
-        _executeProcessPIPath(rootHash, entryNodeHash, path, s, d, o, nonce);
+        _executeFullDAGFlow(entryNodeHash, path, s, o, nonce, fillerDagPrivateKey);
         uint256 gasDAG = gasStartDag - gasleft();
 
         // ============ COMPARISON OUTPUT ============
@@ -847,25 +852,12 @@ contract SwapAaveComparison is Test {
         tokenB.approve(address(nexusSettler), type(uint256).max);
         vm.stopPrank();
 
-        // 2. Create rootHash, signature, nonce for createPI
+        // 2. Setup root node parameters (d will be computed from targetNode)
         bytes32 s = keccak256("source_deposit_swap");
-        bytes32 d = keccak256("destination_deposit_swap");
         bytes32 o = keccak256("offchain_deposit_swap");
         uint256 nonce = 2;
-        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
 
-        // Generate EIP-712 signature
-        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
-        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
-        bytes32 digest = _computeDigest(structHash);
-        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
-        bytes memory signature = abi.encodePacked(r, s_sig, v);
-
-        // 3. Call createPI
-        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
-        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
-
-        // 4. Create IntendNode[] path with 5 connected nodes:
+        // 3. Create IntendNode[] path with 5 connected nodes:
         // Node 0: Pull tokenA from filler to NexusSettler
         // Node 1: Approve pool manager for swap
         // Node 2: Swap tokenA for tokenB
@@ -934,8 +926,27 @@ contract SwapAaveComparison is Test {
 
         vm.prank(fillerDag);
         uint256 gasStart = gasleft();
-        _executeProcessPIPath(rootHash, entryNodeHash, path, s, d, o, nonce);
+        _executeFullDAGFlow(entryNodeHash, path, s, o, nonce, fillerDagPrivateKey);
         uint256 gasUsed = gasStart - gasleft();
+
+        // 5b. Compute rootHash for verification (same as _executeFullDAGFlow)
+        bytes memory chainIdToNodeRoot = new bytes(38);
+        chainIdToNodeRoot[0] = bytes1(uint8(0));
+        chainIdToNodeRoot[1] = bytes1(uint8(1));
+        chainIdToNodeRoot[2] = bytes1(uint8(0));
+        chainIdToNodeRoot[3] = bytes1(uint8(0));
+        chainIdToNodeRoot[4] = bytes1(uint8(uint16(block.chainid) >> 8));
+        chainIdToNodeRoot[5] = bytes1(uint8(uint16(block.chainid)));
+        for (uint256 i = 0; i < 32; i++) {
+            chainIdToNodeRoot[6 + i] = entryNodeHash[i];
+        }
+        INexusSettler.TargetNode memory targetNodeRoot = INexusSettler.TargetNode({
+            targetType: INexusSettler.TargetType.Destination,
+            chainIdToNode: chainIdToNodeRoot
+        });
+        bytes32 d = keccak256(abi.encode(targetNodeRoot));
+        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
+        bytes32 rootHash = keccak256(abi.encode(rootNode, nonce));
 
         // 6. Log results with execution step count
         uint256 stepCount = _countExecutionSteps(path);
@@ -944,23 +955,10 @@ contract SwapAaveComparison is Test {
         console2.log("Node Traversal Count:", stepCount);
 
         // 7. Verify state
-        bytes memory chainIdToNodeVerifyDSD = new bytes(38);
-        chainIdToNodeVerifyDSD[0] = bytes1(uint8(0));
-        chainIdToNodeVerifyDSD[1] = bytes1(uint8(1));
-        chainIdToNodeVerifyDSD[2] = bytes1(uint8(0));
-        chainIdToNodeVerifyDSD[3] = bytes1(uint8(0));
-        chainIdToNodeVerifyDSD[4] = bytes1(uint8(uint16(block.chainid) >> 8));
-        chainIdToNodeVerifyDSD[5] = bytes1(uint8(uint16(block.chainid)));
-        for (uint256 i = 0; i < 32; i++) {
-            chainIdToNodeVerifyDSD[6 + i] = entryNodeHash[i];
-        }
-        INexusSettler.TargetNode memory targetNodeVerifyDSD = INexusSettler.TargetNode({
-            targetType: INexusSettler.TargetType.Destination,
-            chainIdToNode: chainIdToNodeVerifyDSD
-        });
-        bytes32 computedTargetNodeHashDSD = keccak256(abi.encode(targetNodeVerifyDSD));
+        bytes32 computedTargetNodeHashDSD = keccak256(abi.encode(targetNodeRoot));
         bytes32 completionKey = keccak256(abi.encode(rootHash, computedTargetNodeHashDSD));
-        assertTrue(nexusSettler.completed(completionKey), "Path should be completed");
+        (bool isComplete,) = nexusSettler.intentStates(completionKey);
+        assertTrue(isComplete, "Path should be completed");
 
         // Verify filler has aTokens
         uint256 aTokenBalance = mockAToken.balanceOf(fillerDag);
@@ -1020,23 +1018,12 @@ contract SwapAaveComparison is Test {
         tokenB.approve(address(nexusSettler), type(uint256).max);
         vm.stopPrank();
 
-        // Create intent
+        // 2. Setup root node parameters (d will be computed from targetNode)
         bytes32 s = keccak256("source_comparison");
-        bytes32 d = keccak256("destination_comparison");
         bytes32 o = keccak256("offchain_comparison");
         uint256 nonce = 3;
-        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
 
-        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
-        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
-        bytes32 digest = _computeDigest(structHash);
-        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
-        bytes memory signature = abi.encodePacked(r, s_sig, v);
-
-        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
-        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
-
-        // Create 5-node path (pull -> approve -> swap -> approve -> deposit)
+        // 3. Create 5-node path (pull -> approve -> swap -> approve -> deposit)
         INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](5);
 
         // Node 4: Deposit
@@ -1100,7 +1087,7 @@ contract SwapAaveComparison is Test {
 
         vm.prank(fillerDag);
         uint256 gasStartDag = gasleft();
-        _executeProcessPIPath(rootHash, entryNodeHash, path, s, d, o, nonce);
+        _executeFullDAGFlow(entryNodeHash, path, s, o, nonce, fillerDagPrivateKey);
         uint256 gasDAG = gasStartDag - gasleft();
 
         // ============ COMPARISON OUTPUT ============
@@ -1185,21 +1172,12 @@ contract SwapAaveComparison is Test {
         tokenB.approve(address(nexusSettler), type(uint256).max);
         vm.stopPrank();
 
+        // 2. Setup root node parameters (d will be computed from targetNode)
         bytes32 s = keccak256("source_10ops");
-        bytes32 d = keccak256("dest_10ops");
         bytes32 o = keccak256("offchain_10ops");
         uint256 nonce = 10;
-        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
 
-        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
-        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
-        bytes32 digest = _computeDigest(structHash);
-        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
-
-        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
-        nexusSettler.createPI(rootHash, abi.encodePacked(r, s_sig, v), nonce, rootNode);
-
-        // Build 10-node path: two rounds of (pull → approve PM → swap → approve Aave → supply)
+        // 3. Build 10-node path: two rounds of (pull → approve PM → swap → approve Aave → supply)
         INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](10);
 
         // Round 2 (nodes 5-9, built first since next pointers go forward)
@@ -1220,7 +1198,10 @@ contract SwapAaveComparison is Test {
             target: address(mockPoolManager),
             data: abi.encodeWithSignature(
                 "swap((address,address,uint24,int24,address),bool,uint256,uint256)",
-                swapKey, zeroForOne, swapPerRound, minOutPerRound
+                swapKey,
+                zeroForOne,
+                swapPerRound,
+                minOutPerRound
             )
         });
         path[6] = INexusSettler.IntendNode({
@@ -1254,7 +1235,10 @@ contract SwapAaveComparison is Test {
             target: address(mockPoolManager),
             data: abi.encodeWithSignature(
                 "swap((address,address,uint24,int24,address),bool,uint256,uint256)",
-                swapKey, zeroForOne, swapPerRound, minOutPerRound
+                swapKey,
+                zeroForOne,
+                swapPerRound,
+                minOutPerRound
             )
         });
         path[1] = INexusSettler.IntendNode({
@@ -1274,7 +1258,7 @@ contract SwapAaveComparison is Test {
 
         vm.prank(fillerDag);
         uint256 gasStartDag = gasleft();
-        _executeProcessPIPath(rootHash, entryNodeHash, path, s, d, o, nonce);
+        _executeFullDAGFlow(entryNodeHash, path, s, o, nonce, fillerDagPrivateKey);
         uint256 gasDAG = gasStartDag - gasleft();
 
         // ============ COMPARISON OUTPUT ============

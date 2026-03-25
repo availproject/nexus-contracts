@@ -15,7 +15,10 @@ import "../../src/interfaces/INexusSettler.sol";
 // ============================================================================
 contract MockERC20 is ERC20 {
     constructor(string memory name, string memory symbol) ERC20(name, symbol) {}
-    function mint(address to, uint256 amount) external { _mint(to, amount); }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
 }
 
 // ============================================================================
@@ -46,7 +49,7 @@ contract FairAaveDepositComparison is Test {
         mockAToken.setMinter(address(mockAavePool));
         mockAavePool.setATokenForAsset(address(tokenB), address(mockAToken));
     }
-    
+
     function _computeDigest(bytes32 structHash) internal view returns (bytes32) {
         bytes32 DOMAIN_SEPARATOR = keccak256(
             abi.encode(
@@ -59,18 +62,14 @@ contract FairAaveDepositComparison is Test {
         );
         return keccak256(abi.encodePacked(bytes1(0x19), bytes1(0x01), DOMAIN_SEPARATOR, structHash));
     }
-    
+
     function _executeProcessPIPath(
         bytes32 rootHash,
-        bytes32 targetNodeHash,
+        INexusSettler.RootNode memory rootNode,
+        bytes32 entryNodeHash,
         INexusSettler.IntendNode[] memory path,
-        bytes32 s,
-        bytes32 d,
-        bytes32 o,
         uint256 nonce
     ) internal {
-        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
-        
         bytes memory chainIdToNode = new bytes(38);
         chainIdToNode[0] = bytes1(uint8(0));
         chainIdToNode[1] = bytes1(uint8(1));
@@ -79,18 +78,15 @@ contract FairAaveDepositComparison is Test {
         chainIdToNode[4] = bytes1(uint8(uint16(block.chainid) >> 8));
         chainIdToNode[5] = bytes1(uint8(uint16(block.chainid)));
         for (uint256 i = 0; i < 32; i++) {
-            chainIdToNode[6 + i] = targetNodeHash[i];
+            chainIdToNode[6 + i] = entryNodeHash[i];
         }
+
+        INexusSettler.TargetNode memory targetNode =
+            INexusSettler.TargetNode({targetType: INexusSettler.TargetType.Destination, chainIdToNode: chainIdToNode});
         
-        INexusSettler.TargetNode memory targetNode = INexusSettler.TargetNode({
-            targetType: INexusSettler.TargetType.Destination,
-            chainIdToNode: chainIdToNode
-        });
-        
-        bytes32 computedTargetNodeHash = keccak256(abi.encode(targetNode));
-        nexusSettler.processPIPath(rootHash, computedTargetNodeHash, path, targetNode, rootNode, nonce);
+        nexusSettler.processPIPath(rootHash, rootNode, targetNode, path, nonce, false);
     }
-    
+
     /**
      * @notice FAIR COMPARISON: Both approaches do EXACTLY the same operations
      *         through an intermediary contract.
@@ -125,37 +121,22 @@ contract FairAaveDepositComparison is Test {
 
         // Store Direct result before revert
         uint256 directATokenBalance = mockAToken.balanceOf(fillerDirect);
-        
+
         // ============================================
         // DAG APPROACH (2 steps + validation)
         // ============================================
         vm.revertTo(state);
-        
+
         address fillerDag = makeAddr("filler_dag");
         uint256 fillerDagPrivateKey = 0xabcdef1234567890;
         tokenB.mint(fillerDag, INITIAL_BALANCE);
-        
+
         // Setup approvals
         vm.startPrank(fillerDag);
         tokenB.approve(address(nexusSettler), type(uint256).max);
         vm.stopPrank();
-        
-        // Create PI (this is setup, NOT measured in gas comparison)
-        bytes32 s = keccak256("source");
-        bytes32 d = keccak256("dest");
-        bytes32 o = keccak256("offchain");
-        uint256 nonce = 1;
-        bytes32 rootHash = keccak256(abi.encode(s, d, o, nonce));
-        
-        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
-        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
-        bytes32 digest = _computeDigest(structHash);
-        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
-        bytes memory signature = abi.encodePacked(r, s_sig, v);
-        
-        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
-        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
-        
+
+        // Build path FIRST to compute proper hashes
         // Create 3-node path: EXACT same operations as Direct
         // pull -> approve aave pool -> supply
         INexusSettler.IntendNode[] memory path = new INexusSettler.IntendNode[](3);
@@ -165,11 +146,7 @@ contract FairAaveDepositComparison is Test {
             next: bytes32(0),
             target: address(mockAavePool),
             data: abi.encodeWithSignature(
-                "supply(address,uint256,address,uint16)",
-                address(tokenB),
-                DEPOSIT_AMOUNT,
-                fillerDag,
-                0
+                "supply(address,uint256,address,uint16)", address(tokenB), DEPOSIT_AMOUNT, fillerDag, 0
             )
         });
 
@@ -177,11 +154,7 @@ contract FairAaveDepositComparison is Test {
         path[1] = INexusSettler.IntendNode({
             next: keccak256(abi.encode(path[2])),
             target: address(tokenB),
-            data: abi.encodeWithSignature(
-                "approve(address,uint256)",
-                address(mockAavePool),
-                DEPOSIT_AMOUNT
-            )
+            data: abi.encodeWithSignature("approve(address,uint256)", address(mockAavePool), DEPOSIT_AMOUNT)
         });
 
         // Node 0: Pull tokens from filler to settler (Step 1)
@@ -189,23 +162,52 @@ contract FairAaveDepositComparison is Test {
             next: keccak256(abi.encode(path[1])),
             target: address(tokenB),
             data: abi.encodeWithSignature(
-                "transferFrom(address,address,uint256)",
-                fillerDag,
-                address(nexusSettler),
-                DEPOSIT_AMOUNT
+                "transferFrom(address,address,uint256)", fillerDag, address(nexusSettler), DEPOSIT_AMOUNT
             )
         });
-        
-        // Measure gas from THIS POINT (like we did for Direct)
+
         bytes32 entryNodeHash = keccak256(abi.encode(path[0]));
-        
+
+        // Create targetNode from entryNodeHash and compute proper d value
+        bytes memory chainIdToNode = new bytes(38);
+        chainIdToNode[0] = bytes1(uint8(0));
+        chainIdToNode[1] = bytes1(uint8(1));
+        chainIdToNode[2] = bytes1(uint8(0));
+        chainIdToNode[3] = bytes1(uint8(0));
+        chainIdToNode[4] = bytes1(uint8(uint16(block.chainid) >> 8));
+        chainIdToNode[5] = bytes1(uint8(uint16(block.chainid)));
+        for (uint256 i = 0; i < 32; i++) {
+            chainIdToNode[6 + i] = entryNodeHash[i];
+        }
+
+        INexusSettler.TargetNode memory targetNode =
+            INexusSettler.TargetNode({targetType: INexusSettler.TargetType.Destination, chainIdToNode: chainIdToNode});
+
+        bytes32 d = keccak256(abi.encode(targetNode));
+        bytes32 s = keccak256("source");
+        bytes32 o = keccak256("offchain");
+        uint256 nonce = 1;
+        INexusSettler.RootNode memory rootNode = INexusSettler.RootNode({s: s, d: d, o: o});
+        bytes32 rootHash = keccak256(abi.encode(rootNode, nonce));
+
+        // Generate and verify signature
+        bytes32 PI_TYPEHASH = keccak256("NexusPI(bytes32 rootHash,uint256 nonce)");
+        bytes32 structHash = keccak256(abi.encode(PI_TYPEHASH, rootHash, nonce));
+        bytes32 digest = _computeDigest(structHash);
+        (uint8 v, bytes32 r, bytes32 s_sig) = vm.sign(fillerDagPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s_sig, v);
+
+        // Create PI (this is setup, NOT measured in gas comparison)
+        nexusSettler.createPI(rootHash, signature, nonce, rootNode);
+
+        // Measure gas from THIS POINT (like we did for Direct)
         uint256 gasStartDag = gasleft();
-        _executeProcessPIPath(rootHash, entryNodeHash, path, s, d, o, nonce);
+        _executeProcessPIPath(rootHash, rootNode, entryNodeHash, path, nonce);
         uint256 gasDAG = gasStartDag - gasleft();
-        
+
         // Store DAG result
         uint256 dagATokenBalance = mockAToken.balanceOf(fillerDag);
-        
+
         // ============================================
         // COMPARISON OUTPUT
         // ============================================
@@ -228,24 +230,16 @@ contract FairAaveDepositComparison is Test {
         console2.log("    - chain ID validation");
         console2.log("    - path traversal logic");
         console2.log("    - completion tracking");
-        
+
         console2.log("\nResults:");
         console2.log("  DAG Overhead (gas):", gasDAG - gasDirect);
         console2.log("  DAG Overhead (%):", ((gasDAG - gasDirect) * 100) / gasDirect, "%");
         console2.log("  Cost per validation step:", (gasDAG - gasDirect) / 5, "gas"); // 5 validation operations
-        
+
         // Verify both achieved same result
-        assertEq(
-            directATokenBalance, 
-            DEPOSIT_AMOUNT, 
-            "Direct: Filler should have aTokens"
-        );
-        assertEq(
-            dagATokenBalance, 
-            DEPOSIT_AMOUNT, 
-            "DAG: Filler should have aTokens"
-        );
-        
+        assertEq(directATokenBalance, DEPOSIT_AMOUNT, "Direct: Filler should have aTokens");
+        assertEq(dagATokenBalance, DEPOSIT_AMOUNT, "DAG: Filler should have aTokens");
+
         // DAG should have overhead
         assertGt(gasDAG, gasDirect, "DAG must have validation overhead");
     }

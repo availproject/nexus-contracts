@@ -14,16 +14,16 @@ contract NexusEscrow is INexusEscrow, ReentrancyGuardTransient {
 
     /// @notice Settlement contract authorized to initiate transfers
     address public settler;
-    
+
     /// @notice Contract owner authorized to update settler
     address public immutable owner;
 
     /// @notice Thrown when an unauthorized caller attempts settlement
     error UnauthorizedSettler();
-    
+
     /// @notice Thrown when an unauthorized caller attempts to update settler
     error UnauthorizedOwner();
-    
+
     /// @notice Thrown when attempting to set invalid address
     error InvalidAddress();
 
@@ -35,7 +35,7 @@ contract NexusEscrow is INexusEscrow, ReentrancyGuardTransient {
         settler = _settler;
         owner = msg.sender;
     }
-    
+
     /// @notice Modifier to restrict function access to contract owner only
     modifier onlyOwner() {
         if (msg.sender != owner) revert UnauthorizedOwner();
@@ -47,7 +47,7 @@ contract NexusEscrow is INexusEscrow, ReentrancyGuardTransient {
         if (msg.sender != settler) revert UnauthorizedSettler();
         _;
     }
-    
+
     /// @notice Updates the authorized settler address
     /// @dev Can only be called by the contract owner
     /// @param newSettler The new settler contract address
@@ -66,10 +66,10 @@ contract NexusEscrow is INexusEscrow, ReentrancyGuardTransient {
             Settlement memory settlement = settlements[i];
             IERC20 token = IERC20(address(bytes20(settlement.token)));
             address recipient = address(bytes20(settlement.recipient));
-            
+
             // Effects: Perform the transfer (external call is the interaction)
             token.safeTransfer(recipient, settlement.amount);
-            
+
             unchecked {
                 ++i;
             }

@@ -24,12 +24,12 @@ contract DeployScript is Script {
         // Deploy with deployer as temporary settler, will update to actual settler after
         NexusEscrow escrow = new NexusEscrow(deployer);
         console.log("NexusEscrow deployed at: ", address(escrow));
-        
+
         // Deploy NexusSettler with escrow address
         console.log("\nDeploying NexusSettler...");
         NexusSettler settler = new NexusSettler(address(escrow));
         console.log("NexusSettler deployed at: ", address(settler));
-        
+
         // Update escrow settler to actual settler address
         // This requires the escrow to have a setter function
         console.log("\nUpdating NexusEscrow settler...");
