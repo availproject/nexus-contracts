@@ -91,7 +91,7 @@ contract SwapAaveComparison is Test {
         mockAavePool = new MockAavePool();
 
         // Deploy DirectSwapAaveExecutor (extracted mock)
-        directSwapAaveExecutor = new DirectSwapAaveExecutor(address(mockV4SwapRouter), address(mockAavePool));
+        directSwapAaveExecutor = new DirectSwapAaveExecutor(address(mockPoolManager), address(mockAavePool));
 
         // Deploy test tokens (MUST be before setting aToken mapping)
         tokenA = new MockERC20("Token A", "TKA");
@@ -279,11 +279,24 @@ contract SwapAaveComparison is Test {
         tokenB.approve(address(directSwapAaveExecutor), type(uint256).max);
         vm.stopPrank();
 
-        // 4. Measure gas for swap + deposit execution
+        // 4. Build pool key for direct swap
+        PoolKey memory swapKey = PoolKey({
+            currency0: Currency.wrap(address(tokenA) < address(tokenB) ? address(tokenA) : address(tokenB)),
+            currency1: Currency.wrap(address(tokenA) < address(tokenB) ? address(tokenB) : address(tokenA)),
+            fee: SWAP_FEE,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        bool zeroForOne = address(tokenA) < address(tokenB);
+
+        // 5. Measure gas for swap + deposit execution
         vm.prank(fillerDirect);
         uint256 gasStart = gasleft();
 
         directSwapAaveExecutor.execute(
+            address(mockPoolManager), // poolManager
+            swapKey, // pool key
+            zeroForOne, // swap direction
             address(tokenA), // tokenIn
             address(tokenB), // tokenOut
             SWAP_AMOUNT_IN, // swapAmount
@@ -472,10 +485,21 @@ contract SwapAaveComparison is Test {
         tokenA.approve(address(directSwapAaveExecutor), type(uint256).max);
         vm.stopPrank();
 
+        // Build pool key
+        PoolKey memory swapKeyDirect = PoolKey({
+            currency0: Currency.wrap(address(tokenA) < address(tokenB) ? address(tokenA) : address(tokenB)),
+            currency1: Currency.wrap(address(tokenA) < address(tokenB) ? address(tokenB) : address(tokenA)),
+            fee: SWAP_FEE,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        bool zeroForOneDirect = address(tokenA) < address(tokenB);
+
         // Measure gas
         vm.prank(fillerDirect);
         uint256 gasStart = gasleft();
         directSwapAaveExecutor.execute(
+            address(mockPoolManager), swapKeyDirect, zeroForOneDirect,
             address(tokenA), address(tokenB), SWAP_AMOUNT_IN, DEPOSIT_AMOUNT, fillerDirect, SWAP_MIN_AMOUNT_OUT
         );
         uint256 gasDirect = gasStart - gasleft();
@@ -991,16 +1015,22 @@ contract SwapAaveComparison is Test {
         tokenA.approve(address(directSwapAaveExecutor), type(uint256).max);
         vm.stopPrank();
 
+        // Build pool key
+        PoolKey memory swapKeyDirect = PoolKey({
+            currency0: Currency.wrap(address(tokenA) < address(tokenB) ? address(tokenA) : address(tokenB)),
+            currency1: Currency.wrap(address(tokenA) < address(tokenB) ? address(tokenB) : address(tokenA)),
+            fee: SWAP_FEE,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        bool zeroForOneDirect = address(tokenA) < address(tokenB);
+
         // Measure gas for direct swap + deposit
         vm.prank(fillerDirect);
         uint256 gasStart = gasleft();
         directSwapAaveExecutor.execute(
-            address(tokenA), // tokenIn
-            address(tokenB), // tokenOut
-            SWAP_AMOUNT_IN, // swapAmount
-            DEPOSIT_AMOUNT, // depositAmount
-            fillerDirect, // beneficiary
-            SWAP_MIN_AMOUNT_OUT // minAmountOut
+            address(mockPoolManager), swapKeyDirect, zeroForOneDirect,
+            address(tokenA), address(tokenB), SWAP_AMOUNT_IN, DEPOSIT_AMOUNT, fillerDirect, SWAP_MIN_AMOUNT_OUT
         );
         uint256 gasDirect = gasStart - gasleft();
 

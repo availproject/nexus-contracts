@@ -3,7 +3,6 @@ pragma solidity 0.8.26;
 
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
-import {MockV4SwapRouter} from "./MockV4SwapRouter.sol";
 import {MockAavePool} from "./MockAavePool.sol";
 import {MockPoolManager} from "./MockPoolManager.sol";
 import {PoolKey} from "lib/v4-core/src/types/PoolKey.sol";
@@ -14,16 +13,20 @@ import {PoolKey} from "lib/v4-core/src/types/PoolKey.sol";
 contract DirectSwapAaveExecutor {
     using SafeERC20 for IERC20;
 
-    MockV4SwapRouter public immutable SWAP_ROUTER;
+    MockPoolManager public immutable POOL_MANAGER;
     MockAavePool public immutable AAVE_POOL;
 
-    constructor(address swapRouter, address aavePool) {
-        SWAP_ROUTER = MockV4SwapRouter(swapRouter);
+    constructor(address poolManager, address aavePool) {
+        POOL_MANAGER = MockPoolManager(poolManager);
         AAVE_POOL = MockAavePool(aavePool);
     }
 
     /**
      * @notice Execute swap then deposit to Aave
+     * @dev Calls PoolManager directly (no router intermediary) for fair comparison with DAG
+     * @param poolManager Pool manager address
+     * @param key Pool key for the swap
+     * @param zeroForOne Swap direction
      * @param tokenIn Input token address
      * @param tokenOut Output token address
      * @param swapAmount Amount to swap
@@ -33,6 +36,9 @@ contract DirectSwapAaveExecutor {
      * @return success True if both operations succeeded
      */
     function execute(
+        address poolManager,
+        PoolKey calldata key,
+        bool zeroForOne,
         address tokenIn,
         address tokenOut,
         uint256 swapAmount,
@@ -40,14 +46,14 @@ contract DirectSwapAaveExecutor {
         address beneficiary,
         uint256 minAmountOut
     ) external returns (bool success) {
-        // Transfer tokens from caller to executor
+        // Pull tokens from caller to executor
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), swapAmount);
 
-        // Approve swap router
-        IERC20(tokenIn).approve(address(SWAP_ROUTER), swapAmount);
+        // Approve pool manager
+        IERC20(tokenIn).approve(poolManager, swapAmount);
 
-        // Execute swap - output tokens go to this contract
-        uint256 swappedAmount = SWAP_ROUTER.executeSwap(tokenIn, tokenOut, swapAmount, minAmountOut);
+        // Execute swap directly via pool manager
+        MockPoolManager(poolManager).swap(key, zeroForOne, swapAmount, minAmountOut);
 
         // Approve Aave pool
         IERC20(tokenOut).approve(address(AAVE_POOL), depositAmount);
