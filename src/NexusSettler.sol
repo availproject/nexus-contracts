@@ -21,13 +21,6 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
     /// Escrow contract for fund locking
     address public immutable escrow;
 
-    /// @notice Packed intent state per completion key
-    /// @dev Uses uint248 for bitmap to pack with two bools in single slot
-    struct IntentState {
-        bool completed;
-        uint248 bitmap;
-    }
-
     /// Prevents replay: each rootHash can only be created once
     mapping(bytes32 => bool) public created;
 
@@ -41,7 +34,7 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
     uint256 private constant MAX_PATH_LENGTH = 100;
 
     constructor(address newEscrow) EIP712("NexusSettler", "2") {
-        require(newEscrow != address(0), "Invalid escrow");
+        if (newEscrow == address(0)) revert InvalidTarget();
         escrow = newEscrow;
     }
 

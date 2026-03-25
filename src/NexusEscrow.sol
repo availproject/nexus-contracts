@@ -63,7 +63,7 @@ contract NexusEscrow is INexusEscrow, ReentrancyGuardTransient {
     function settle(Settlement[] calldata settlements) external onlySettler nonReentrant {
         uint256 i;
         for (i = 0; i < settlements.length;) {
-            Settlement memory settlement = settlements[i];
+            Settlement calldata settlement = settlements[i];
             IERC20 token = IERC20(address(bytes20(settlement.token)));
             address recipient = address(bytes20(settlement.recipient));
 

@@ -2,7 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Script, console} from "forge-std/Script.sol";
-import {UniswapV4Router} from "../src/routers/UniswapV4Router.sol";
+import {UniswapV4Router} from "../test/routers/UniswapV4Router.sol";
 
 contract DeploySwapRouterScript is Script {
     function run() external {

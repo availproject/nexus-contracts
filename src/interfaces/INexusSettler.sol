@@ -7,24 +7,6 @@ pragma solidity 0.8.26;
  * @dev Node data stays in calldata—only completion status hits storage.
  */
 interface INexusSettler {
-    /// Kept for IActionRouter compatibility
-    enum ActionType {
-        PERMIT,
-        PERMIT2,
-        TRANSFER,
-        BRIDGE,
-        SWAP,
-        BRIDGE_AND_SWAP
-    }
-
-    /// Kept for IActionRouter compatibility
-    struct Action {
-        ActionType actionType;
-        string target;
-        bytes callData;
-        uint256 value;
-    }
-
     /**
      * @notice Execution node data
      * @dev Lives in calldata, never stored.
@@ -55,6 +37,13 @@ interface INexusSettler {
     struct TargetNode {
         TargetType targetType;
         bytes chainIdToNode; // <k:2><seed:2><chainId_0:2><hash_0:32>...
+    }
+
+    /// @notice Packed intent state per completion key
+    /// @dev Uses uint248 for bitmap to pack with bool in single slot
+    struct IntentState {
+        bool completed;
+        uint248 bitmap;
     }
 
     error InvalidSignature();

@@ -2,7 +2,6 @@
 pragma solidity 0.8.26;
 
 import {IActionRouter} from "../interfaces/IActionRouter.sol";
-import {INexusSettler} from "../interfaces/INexusSettler.sol";
 import {UniversalRouter} from "lib/universal-router/contracts/UniversalRouter.sol";
 import {Commands} from "lib/universal-router/contracts/libraries/Commands.sol";
 import {PoolKey} from "lib/v4-core/src/types/PoolKey.sol";
@@ -40,12 +39,12 @@ contract UniswapV4Router is IActionRouter, ReentrancyGuardTransient {
         PERMIT_2 = IPermit2(_permit2);
     }
 
-    function execute(INexusSettler.Action calldata action, bytes calldata previousData)
+    function execute(IActionRouter.Action calldata action, bytes calldata previousData)
         external
         nonReentrant
         returns (bytes memory)
     {
-        if (action.actionType != INexusSettler.ActionType.SWAP) {
+        if (action.actionType != IActionRouter.ActionType.SWAP) {
             revert("Invalid action type");
         }
         Swap memory swap = abi.decode(action.callData, (Swap));
