@@ -13,7 +13,7 @@ import {INexusSettler} from "./interfaces/INexusSettler.sol";
  * @author Rachit Anand Srivastava (@privacy_prophet)
  * @dev All node data lives in calldata—only completion flags touch storage.
  *      Two mappings track state: created[rootHash] and intentStates[completionKey].
- *      IntentState packs completed + height + bitmap into slot 1, nextHash in slot 2.
+ *      IntentState packs completed + bitmap into slot 1, nextHash in slot 2.
  *      True resumability: resumed calls only pass remaining nodes, not the full path.
  */
 contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
@@ -104,7 +104,7 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
 
         bytes32 firstNodeHash = keccak256(abi.encode(path[0]));
 
-        if (state.height == 0) {
+        if (state.bitmap == 0) {
             // First call: validate path[0] against target's perfect hash table
             bytes32 expectedHash = _extractTargetHash(targetNode.chainIdToNode);
             if (firstNodeHash != expectedHash) revert InvalidPath();
@@ -113,40 +113,37 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
             if (firstNodeHash != state.nextHash) revert InvalidPath();
         }
 
-        (uint8 endHeight, bool isComplete, bytes32 lastNodeHash, bytes32 nextHash, uint240 updatedBitmap) =
-            _executePath(state.height, state.bitmap, path);
+        (bool isComplete, bytes32 lastNodeHash, bytes32 nextHash, uint248 updatedBitmap) =
+            _executePath(state.bitmap, path);
 
         intentStates[completionKey] = IntentState({
             completed: isComplete,
-            height: endHeight,
             bitmap: updatedBitmap,
             nextHash: nextHash
         }); // 1 SSTORE (2 slots)
 
-        emit IntendPathProcessed(computedTargetRootHash, lastNodeHash, rootHash, endHeight);
+        emit IntendPathProcessed(computedTargetRootHash, lastNodeHash, rootHash);
     }
 
     /**
      * @notice Executes IntendNode path from calldata using bitmap tracking
-     * @dev On first call startHeight=0; on resume startHeight=stored height.
+     * @dev Height is derived from bitmap popcount (bits are contiguous from 0).
      *      Only new nodes are passed—no re-traversal of already-processed nodes.
      *      Bitmap bits correspond to absolute height positions.
-     * @param startHeight Height offset (0 on first call, stored height on resume)
      * @param currentBitmap Bitmap from previous execution (0 on first call)
      * @param path IntendNodes to execute (only unprocessed nodes)
-     * @return endHeight Total nodes processed across all calls
      * @return isComplete True if reached terminal (next == bytes32(0))
      * @return lastNodeHash Hash of last node processed
      * @return nextHash Expected hash of path[0] for next resume (0 if complete)
      * @return updatedBitmap Updated bitmap with new nodes marked
      */
-    function _executePath(uint8 startHeight, uint240 currentBitmap, IntendNode[] calldata path)
+    function _executePath(uint248 currentBitmap, IntendNode[] calldata path)
         private
-        returns (uint8 endHeight, bool isComplete, bytes32 lastNodeHash, bytes32 nextHash, uint240 updatedBitmap)
+        returns (bool isComplete, bytes32 lastNodeHash, bytes32 nextHash, uint248 updatedBitmap)
     {
         uint256 currentIdx = 0;
-        uint256 height = startHeight;
         uint256 bitmap = currentBitmap;
+        uint256 height = _popcount(bitmap);
         uint256 pathLen = path.length;
 
         while (currentIdx < pathLen) {
@@ -179,8 +176,19 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
             }
         }
 
-        endHeight = uint8(height);
-        updatedBitmap = uint240(bitmap);
+        updatedBitmap = uint248(bitmap);
+    }
+
+    /**
+     * @notice Counts set bits in a bitmap (contiguous from bit 0)
+     * @param bitmap The bitmap value
+     * @return count Number of set bits
+     */
+    function _popcount(uint256 bitmap) private pure returns (uint256 count) {
+        while (bitmap != 0) {
+            unchecked { count++; }
+            bitmap &= bitmap - 1;
+        }
     }
 
     /**

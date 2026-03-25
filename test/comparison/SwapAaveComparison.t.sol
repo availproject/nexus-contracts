@@ -439,7 +439,7 @@ contract SwapAaveComparison is Test {
         // 7. Verify state
         bytes32 computedTargetNodeHash = keccak256(abi.encode(targetNodeRoot));
         bytes32 completionKey = keccak256(abi.encode(rootHash, computedTargetNodeHash));
-        (bool isComplete,,,) = nexusSettler.intentStates(completionKey);
+        (bool isComplete,,) = nexusSettler.intentStates(completionKey);
         assertTrue(isComplete, "Path should be completed");
 
         // Verify filler has aTokens
@@ -719,7 +719,7 @@ contract SwapAaveComparison is Test {
         // 7. Verify state
         bytes32 computedTargetNodeHash = keccak256(abi.encode(targetNodeRoot));
         bytes32 completionKey = keccak256(abi.encode(rootHash, computedTargetNodeHash));
-        (bool isComplete,,,) = nexusSettler.intentStates(completionKey);
+        (bool isComplete,,) = nexusSettler.intentStates(completionKey);
         assertTrue(isComplete, "Path should be completed");
 
         // Verify filler has aTokens
@@ -957,7 +957,7 @@ contract SwapAaveComparison is Test {
         // 7. Verify state
         bytes32 computedTargetNodeHashDSD = keccak256(abi.encode(targetNodeRoot));
         bytes32 completionKey = keccak256(abi.encode(rootHash, computedTargetNodeHashDSD));
-        (bool isComplete,,,) = nexusSettler.intentStates(completionKey);
+        (bool isComplete,,) = nexusSettler.intentStates(completionKey);
         assertTrue(isComplete, "Path should be completed");
 
         // Verify filler has aTokens

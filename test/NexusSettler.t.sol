@@ -239,7 +239,7 @@ contract NexusSettlerTest is Test {
         // 4. Execute with validation
         nexusSettler.processPIPath(rootHash, rootNode, targetNode, path, nonce, true);
 
-        (bool isComplete,,,) = nexusSettler.intentStates(_getCompletionKey(rootHash, computedTargetHash));
+        (bool isComplete,,) = nexusSettler.intentStates(_getCompletionKey(rootHash, computedTargetHash));
         assertTrue(isComplete, "Should complete");
     }
 

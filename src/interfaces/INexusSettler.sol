@@ -40,12 +40,12 @@ interface INexusSettler {
     }
 
     /// @notice Packed intent state per completion key
-    /// @dev Slot 1: completed (1) + height (1) + bitmap (30) = 32 bytes
+    /// @dev Slot 1: completed (1) + bitmap (31) = 32 bytes
     ///      Slot 2: nextHash (32 bytes) — expected hash of path[0] on resume
+    ///      Height is derived from bitmap popcount (bits are contiguous from 0).
     struct IntentState {
         bool completed;
-        uint8 height;
-        uint240 bitmap;
+        uint248 bitmap;
         bytes32 nextHash;
     }
 
@@ -81,9 +81,8 @@ interface INexusSettler {
      * @param targetNodeHash Entry point hash
      * @param lastNodeHash Final node executed
      * @param graphRoot Root hash of intent
-     * @param height Nodes executed
      */
-    event IntendPathProcessed(bytes32 indexed targetNodeHash, bytes32 lastNodeHash, bytes32 graphRoot, uint256 height);
+    event IntendPathProcessed(bytes32 indexed targetNodeHash, bytes32 lastNodeHash, bytes32 graphRoot);
 
     /**
      * @notice Creates a signed Path Intent
@@ -122,5 +121,5 @@ interface INexusSettler {
     function intentStates(bytes32 completionKey)
         external
         view
-        returns (bool completed, uint8 height, uint240 bitmap, bytes32 nextHash);
+        returns (bool completed, uint248 bitmap, bytes32 nextHash);
 }

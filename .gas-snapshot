@@ -1,5 +1,0 @@
-GasProfilerTest:testGasProfile_AaveDeposit_Comparison() (gas: 1549959)
-GasProfilerTest:testGasProfile_AaveDeposit_Direct() (gas: 86555)
-GasProfilerTest:testGasProfile_AaveDeposit_NexusSettler() (gas: 1459733)
-GasProfilerTest:testGasSnapshot_AaveDeposit_Direct() (gas: 83397)
-GasProfilerTest:testGasSnapshot_AaveDeposit_NexusSettler() (gas: 1466788)
