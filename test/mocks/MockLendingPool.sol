@@ -81,4 +81,48 @@ contract MockLendingPool {
     function getSuppliedBalance(address user, address asset) external view returns (uint256) {
         return supplied[user][asset];
     }
+
+    /// @notice Receive tokens and mint aTokens to user (for testing)
+    /// @dev This function is called when tokens are transferred directly to the pool
+    /// @param user User to receive aTokens
+    /// @param asset Underlying asset address
+    /// @param amount Amount to supply
+    function receiveAndMint(address user, address asset, uint256 amount) external {
+        require(amount > 0, "Amount must be greater than 0");
+        
+        // Update tracking
+        supplied[user][asset] += amount;
+        
+        // Mint aTokens to user (if aToken exists for this asset)
+        address aToken = aTokenAddresses[asset];
+        if (aToken != address(0)) {
+            // Use interface to call mint function
+            (bool success,) = aToken.call(abi.encodeWithSignature("mint(address,uint256)", user, amount));
+            require(success, "Mint failed");
+        }
+        
+        emit Supplied(user, asset, amount);
+    }
+
+    /// @notice Mint aTokens to user after receiving tokens (for testing)
+    /// @dev This function assumes tokens have already been transferred to this contract
+    /// @param user User to receive aTokens
+    /// @param asset Underlying asset address
+    /// @param amount Amount to mint aTokens for
+    function mintATokensToUser(address user, address asset, uint256 amount) external {
+        require(amount > 0, "Amount must be greater than 0");
+        
+        // Update tracking
+        supplied[user][asset] += amount;
+        
+        // Mint aTokens to user (if aToken exists for this asset)
+        address aToken = aTokenAddresses[asset];
+        if (aToken != address(0)) {
+            // Use interface to call mint function
+            (bool success,) = aToken.call(abi.encodeWithSignature("mint(address,uint256)", user, amount));
+            require(success, "Mint failed");
+        }
+        
+        emit Supplied(user, asset, amount);
+    }
 }
