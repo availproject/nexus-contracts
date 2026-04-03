@@ -60,7 +60,40 @@ contract BridgeSwapEscrow is ReentrancyGuardTransient, AccessControl {
     /// @notice Deposits user funds into escrow for bridge + swap + deposit flow
     /// @param intent The intent details
     function depositIntent(Intent calldata intent) external nonReentrant {
-        // TODO: Implement deposit logic
+        // ===== CHECKS =====
+        // Verify amount is positive
+        if (intent.amount == 0) revert("Amount must be greater than zero");
+        
+        // Calculate intent ID
+        bytes32 intentId = keccak256(abi.encode(intent));
+        
+        // Verify intent not already deposited
+        if (intentStatus[intentId].deposited) revert("Intent already deposited");
+        
+        // ===== EFFECTS =====
+        // Store intent with deadline
+        intents[intentId] = Intent({
+            user: intent.user,
+            token: intent.token,
+            amount: intent.amount,
+            deadline: block.timestamp + DEFAULT_TIMEOUT,
+            intentId: intentId
+        });
+        
+        // Set status as deposited
+        intentStatus[intentId] = IntentStatus({
+            deposited: true,
+            refunded: false,
+            completed: false,
+            stepBitmap: 0
+        });
+        
+        // ===== INTERACTIONS =====
+        // Transfer tokens from user to escrow
+        IERC20(intent.token).safeTransferFrom(msg.sender, address(this), intent.amount);
+        
+        // Emit event
+        emit IntentDeposited(intentId, msg.sender, intent.token, intent.amount);
     }
 
     /// @notice Releases funds after step completion (called by settler)
@@ -74,7 +107,38 @@ contract BridgeSwapEscrow is ReentrancyGuardTransient, AccessControl {
         address target,
         uint256 amount
     ) external onlyRole(SETTLER_ROLE) nonReentrant {
-        // TODO: Implement release logic
+        // ===== CHECKS =====
+        // Verify intent exists
+        if (!intentStatus[intentId].deposited) revert("Intent not deposited");
+        
+        // Verify not refunded
+        if (intentStatus[intentId].refunded) revert("Intent already refunded");
+        
+        // Verify not completed
+        if (intentStatus[intentId].completed) revert("Intent already completed");
+        
+        // Verify deadline not passed
+        if (block.timestamp > intents[intentId].deadline) revert("Deadline passed");
+        
+        // Verify step not already complete
+        if ((intentStatus[intentId].stepBitmap & (1 << step)) != 0) revert("Step already complete");
+        
+        // Verify amount is positive
+        if (amount == 0) revert("Amount must be greater than zero");
+        
+        // Verify target is valid
+        if (target == address(0)) revert("Invalid target address");
+        
+        // ===== EFFECTS =====
+        // Update bitmap to mark step as complete
+        intentStatus[intentId].stepBitmap |= (1 << step);
+        
+        // ===== INTERACTIONS =====
+        // Transfer tokens to target
+        IERC20(intents[intentId].token).safeTransfer(target, amount);
+        
+        // Emit event
+        emit StepReleased(intentId, step, target, amount);
     }
 
     /// @notice Claims refund after timeout deadline passes

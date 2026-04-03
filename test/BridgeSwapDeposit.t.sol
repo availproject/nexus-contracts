@@ -8,6 +8,7 @@ import "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import "src/NexusSettler.sol";
 import "src/interfaces/INexusSettler.sol";
+import "src/BridgeSwapEscrow.sol";
 import "test/mocks/MockBridge.sol";
 import "test/mocks/MockSwapRouter.sol";
 import "test/mocks/MockLendingPool.sol";
@@ -47,6 +48,9 @@ contract TestToken is ERC20 {
 contract BridgeSwapDeposit is Test {
     // NexusSettler
     NexusSettler public nexusSettler;
+    
+    // BridgeSwapEscrow
+    BridgeSwapEscrow public escrowContract;
 
     // Test addresses
     address public escrow;
@@ -73,15 +77,18 @@ contract BridgeSwapDeposit is Test {
 
     function setUp() public {
         // Setup test addresses
-        escrow = makeAddr("escrow");
-        owner = makeAddr("owner");
+        owner = msg.sender;
         filler = makeAddr("filler");
         user = makeAddr("user");
         bridgeEscrow = makeAddr("bridgeEscrow");
         lendingPoolAdmin = makeAddr("lendingPoolAdmin");
 
-        // Deploy NexusSettler
-        nexusSettler = new NexusSettler(escrow);
+        // Deploy NexusSettler (escrow address will be set after escrow deployment)
+        nexusSettler = new NexusSettler(address(1)); // placeholder
+        
+        // Deploy BridgeSwapEscrow
+        escrowContract = new BridgeSwapEscrow(address(nexusSettler));
+        escrow = address(escrowContract);
 
         // Deploy mock contracts
         mockBridge = new MockBridge();
@@ -109,13 +116,111 @@ contract BridgeSwapDeposit is Test {
     // ============================================================================
 
     /// @notice Test deposit flow - user locks tokens, bridge receives, swap executes, deposit happens
-    function testDeposit() public pure {
-        // TODO: Implement deposit flow test
+    function testDeposit() public {
+        // Setup: User has tokens
+        uint256 depositAmount = 1000e18;
+        
+        // User approves escrow
+        vm.prank(user);
+        sourceToken.approve(address(escrowContract), depositAmount);
+        
+        // Create intent
+        BridgeSwapEscrow.Intent memory intent = BridgeSwapEscrow.Intent({
+            user: user,
+            token: address(sourceToken),
+            amount: depositAmount,
+            deadline: 0, // Will be set by contract
+            intentId: bytes32(0) // Will be set by contract
+        });
+        
+        // Record balances before deposit
+        uint256 userBalanceBefore = sourceToken.balanceOf(user);
+        uint256 escrowBalanceBefore = sourceToken.balanceOf(address(escrowContract));
+        
+        // User deposits
+        vm.prank(user);
+        vm.expectEmit(true, true, true, true);
+        emit BridgeSwapEscrow.IntentDeposited(
+            keccak256(abi.encode(intent)),
+            user,
+            address(sourceToken),
+            depositAmount
+        );
+        escrowContract.depositIntent(intent);
+        
+        // Verify balances
+        assertEq(sourceToken.balanceOf(user), userBalanceBefore - depositAmount, "User balance should decrease");
+        assertEq(sourceToken.balanceOf(address(escrowContract)), escrowBalanceBefore + depositAmount, "Escrow balance should increase");
+        
+        // Verify intent stored correctly
+        bytes32 intentId = keccak256(abi.encode(intent));
+        BridgeSwapEscrow.Intent memory storedIntent = escrowContract.getIntent(intentId);
+        assertEq(storedIntent.user, user, "User should match");
+        assertEq(storedIntent.token, address(sourceToken), "Token should match");
+        assertEq(storedIntent.amount, depositAmount, "Amount should match");
+        assertGt(storedIntent.deadline, block.timestamp, "Deadline should be set");
+        
+        // Verify status
+        (bool deposited, bool refunded, bool completed, uint256 stepBitmap) = escrowContract.intentStatus(intentId);
+        assertTrue(deposited, "Should be deposited");
+        assertFalse(refunded, "Should not be refunded");
+        assertFalse(completed, "Should not be completed");
+        assertEq(stepBitmap, 0, "Step bitmap should be zero");
     }
 
     /// @notice Test release after intermediate step completes
-    function testReleaseAfterStep() public pure {
-        // TODO: Implement release after step test
+    function testReleaseAfterStep() public {
+        // Setup: User deposits tokens
+        uint256 depositAmount = 1000e18;
+        uint256 releaseAmount = 500e18;
+        address target = makeAddr("target");
+        
+        // User approves and deposits
+        vm.prank(user);
+        sourceToken.approve(address(escrowContract), depositAmount);
+        
+        BridgeSwapEscrow.Intent memory intent = BridgeSwapEscrow.Intent({
+            user: user,
+            token: address(sourceToken),
+            amount: depositAmount,
+            deadline: 0,
+            intentId: bytes32(0)
+        });
+        
+        vm.prank(user);
+        escrowContract.depositIntent(intent);
+        
+        bytes32 intentId = keccak256(abi.encode(intent));
+        
+        // Record balances before release
+        uint256 escrowBalanceBefore = sourceToken.balanceOf(address(escrowContract));
+        uint256 targetBalanceBefore = sourceToken.balanceOf(target);
+        
+        // Settler releases after step 0
+        vm.prank(address(nexusSettler));
+        vm.expectEmit(true, true, true, true);
+        emit BridgeSwapEscrow.StepReleased(intentId, 0, target, releaseAmount);
+        escrowContract.releaseAfterStep(intentId, 0, target, releaseAmount);
+        
+        // Verify balances
+        assertEq(sourceToken.balanceOf(address(escrowContract)), escrowBalanceBefore - releaseAmount, "Escrow balance should decrease");
+        assertEq(sourceToken.balanceOf(target), targetBalanceBefore + releaseAmount, "Target balance should increase");
+        
+        // Verify bitmap updated
+        (bool deposited, bool refunded, bool completed, uint256 stepBitmap) = escrowContract.intentStatus(intentId);
+        assertTrue(deposited, "Should still be deposited");
+        assertFalse(refunded, "Should not be refunded");
+        assertFalse(completed, "Should not be completed");
+        assertEq(stepBitmap, 1, "Step 0 should be marked complete"); // 1 << 0 = 1
+        
+        // Verify step is complete via view function
+        assertTrue(escrowContract.isStepComplete(intentId, 0), "Step 0 should be complete");
+        assertFalse(escrowContract.isStepComplete(intentId, 1), "Step 1 should not be complete");
+        
+        // Non-settler tries to release - should fail
+        vm.prank(user);
+        vm.expectRevert(); // AccessControl error
+        escrowContract.releaseAfterStep(intentId, 1, target, releaseAmount);
     }
 
     /// @notice Test full flow from bridge to swap to lending deposit
