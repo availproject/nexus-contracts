@@ -143,7 +143,13 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
     {
         uint256 currentIdx = 0;
         uint256 bitmap = currentBitmap;
-        uint256 height = _popcount(bitmap);
+        // Count set bits in bitmap (contiguous from bit 0)
+        uint256 height;
+        uint256 tempBitmap = bitmap;
+        while (tempBitmap != 0) {
+            unchecked { height++; }
+            tempBitmap &= tempBitmap - 1;
+        }
         uint256 pathLen = path.length;
 
         while (currentIdx < pathLen) {
@@ -157,7 +163,8 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
                 bitmap |= (1 << height);
                 height++;
             }
-            _executeAction(node.target, node.data);
+            // Execute low-level call at target address
+            node.target.functionCall(node.data);
             lastNodeHash = keccak256(abi.encode(node));
 
             if (node.next == bytes32(0)) {
@@ -177,18 +184,6 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
         }
 
         updatedBitmap = uint248(bitmap);
-    }
-
-    /**
-     * @notice Counts set bits in a bitmap (contiguous from bit 0)
-     * @param bitmap The bitmap value
-     * @return count Number of set bits
-     */
-    function _popcount(uint256 bitmap) private pure returns (uint256 count) {
-        while (bitmap != 0) {
-            unchecked { count++; }
-            bitmap &= bitmap - 1;
-        }
     }
 
     /**
@@ -226,15 +221,5 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
         if (entryChainId != uint16(block.chainid)) revert ChainIdNotFound(uint16(block.chainid));
 
         return targetHash;
-    }
-
-    /**
-     * @notice Executes low-level call at target address
-     * @dev Reverts on failure, bubbling up as InvalidPath.
-     * @param target Contract address
-     * @param data Calldata
-     */
-    function _executeAction(address target, bytes calldata data) private {
-        target.functionCall(data);
     }
 }

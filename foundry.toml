@@ -26,4 +26,30 @@ optimizer = true
 optimizer_runs = 200
 viaIR = false
 
+[rpc_endpoints]
+# Mainnets
+ethereum = "${ETHEREUM_RPC_URL}"
+polygon = "${POLYGON_MAINNET_RPC_URL}"
+arbitrum = "${ARBITRUM_ONE_RPC_URL}"
+optimism = "${OPTIMISM_MAINNET_RPC_URL}"
+base = "${BASE_MAINNET_RPC_URL}"
+scroll = "${SCROLL_MAINNET_RPC_URL}"
+avalanche = "${AVALANCHE_C_CHAIN_RPC_URL}"
+hyperliquid = "${HYPERLIQUID_RPC_URL}"
+kaia = "${KAIA_MAINNET_RPC_URL}"
+bnb = "${BNB_SMART_CHAIN_MAINNET_RPC_URL}"
+monad = "${MONAD_MAINNET_RPC_URL}"
+citrea = "${CITREA_MAINNET_RPC_URL}"
+megaeth = "${MEGA_ETH_RPC_URL}"
+
+# Testnets
+arb-sepolia = "${ARB_SEPOLIA_RPC_URL}"
+op-sepolia = "${OP_SEPOLIA_RPC_URL}"
+monad-testnet = "${MONAD_TESTNET_RPC_URL}"
+holesky = "${HOLESKY_RPC_URL}"
+sepolia = "${SEPOLIA}"
+citrea-testnet = "${CITREA_TESTNET_RPC_URL}"
+base-sepolia = "${BASE_SEPOLIA_RPC_URL}"
+polygon-amoy = "${POLYGON_AMONY_RPC_URL}"
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
