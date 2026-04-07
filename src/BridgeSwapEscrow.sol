@@ -35,11 +35,24 @@ contract BridgeSwapEscrow is ReentrancyGuardTransient, AccessControl {
         uint256 stepBitmap;
     }
 
+    /// @notice Detailed step status for viewing
+    struct StepStatus {
+        bool deposited;
+        bool refunded;
+        bool completed;
+        bool stepComplete;
+        uint256 deadline;
+        uint256 remainingAmount;
+    }
+
     /// @notice Mapping from intent ID to intent details
     mapping(bytes32 => Intent) public intents;
 
     /// @notice Mapping from intent ID to intent status
     mapping(bytes32 => IntentStatus) public intentStatus;
+
+    /// @notice Mapping from intent ID to total released amount
+    mapping(bytes32 => uint256) public releasedAmounts;
 
     /// @notice Emitted when user deposits an intent
     event IntentDeposited(bytes32 indexed intentId, address indexed user, address token, uint256 amount);
@@ -133,6 +146,9 @@ contract BridgeSwapEscrow is ReentrancyGuardTransient, AccessControl {
         // Update bitmap to mark step as complete
         intentStatus[intentId].stepBitmap |= (1 << step);
         
+        // Track released amount
+        releasedAmounts[intentId] += amount;
+        
         // ===== INTERACTIONS =====
         // Transfer tokens to target
         IERC20(intents[intentId].token).safeTransfer(target, amount);
@@ -144,7 +160,35 @@ contract BridgeSwapEscrow is ReentrancyGuardTransient, AccessControl {
     /// @notice Claims refund after timeout deadline passes
     /// @param intentId The intent identifier
     function claimTimeoutRefund(bytes32 intentId) external nonReentrant {
-        // TODO: Implement timeout refund logic
+        // ===== CHECKS =====
+        // Verify intent exists
+        if (!intentStatus[intentId].deposited) revert("Intent not deposited");
+        
+        // Verify caller is the intent user
+        if (intents[intentId].user != msg.sender) revert("Only user can claim refund");
+        
+        // Verify deadline has passed
+        if (block.timestamp <= intents[intentId].deadline) revert("Deadline not passed");
+        
+        // Verify not already refunded
+        if (intentStatus[intentId].refunded) revert("Intent already refunded");
+        
+        // Verify not completed
+        if (intentStatus[intentId].completed) revert("Intent already completed");
+        
+        // ===== EFFECTS =====
+        // Calculate refund amount (total deposited - total released)
+        uint256 refundAmount = intents[intentId].amount - releasedAmounts[intentId];
+        
+        // Set refunded flag
+        intentStatus[intentId].refunded = true;
+        
+        // ===== INTERACTIONS =====
+        // Transfer refund to user
+        IERC20(intents[intentId].token).safeTransfer(msg.sender, refundAmount);
+        
+        // Emit event
+        emit IntentRefunded(intentId, msg.sender, intents[intentId].token, refundAmount);
     }
 
     /// @notice Retrieves full intent details
@@ -160,5 +204,20 @@ contract BridgeSwapEscrow is ReentrancyGuardTransient, AccessControl {
     /// @return True if step is complete
     function isStepComplete(bytes32 intentId, uint8 step) external view returns (bool) {
         return (intentStatus[intentId].stepBitmap & (1 << step)) != 0;
+    }
+
+    /// @notice Gets detailed status for a specific step
+    /// @param intentId The intent identifier
+    /// @param step The step number to check
+    /// @return StepStatus struct with detailed information
+    function getStepStatus(bytes32 intentId, uint8 step) external view returns (StepStatus memory) {
+        return StepStatus({
+            deposited: intentStatus[intentId].deposited,
+            refunded: intentStatus[intentId].refunded,
+            completed: intentStatus[intentId].completed,
+            stepComplete: (intentStatus[intentId].stepBitmap & (1 << step)) != 0,
+            deadline: intents[intentId].deadline,
+            remainingAmount: intents[intentId].amount - releasedAmounts[intentId]
+        });
     }
 }

@@ -13,6 +13,7 @@ import "test/mocks/MockBridge.sol";
 import "test/mocks/MockSwapRouter.sol";
 import "test/mocks/MockLendingPool.sol";
 import "test/mocks/MockAToken.sol";
+import "test/mocks/MockReentrantToken.sol";
 
 // ============================================================================
 // Test Constants
@@ -653,6 +654,392 @@ contract BridgeSwapDeposit is Test {
 
     /// @notice Test reentrancy protection
     function testReentrancyProtection() public pure {
-        // TODO: Implement reentrancy protection test
+        // This test is replaced by testReentrancyProtectionOnDeposit and testReentrancyProtectionOnRefund
+    }
+
+    // ============================================================================
+    // Task 6: Integration Test
+    // ============================================================================
+
+    /// @notice Test integration: verify NexusSettler → Escrow callback pattern works correctly
+    function testIntegration() public {
+        // Setup: User deposits tokens
+        uint256 depositAmount = 1000e18;
+        
+        vm.prank(user);
+        sourceToken.approve(address(escrowContract), depositAmount);
+        
+        BridgeSwapEscrow.Intent memory intent = BridgeSwapEscrow.Intent({
+            user: user,
+            token: address(sourceToken),
+            amount: depositAmount,
+            deadline: 0,
+            intentId: bytes32(0)
+        });
+        
+        vm.prank(user);
+        escrowContract.depositIntent(intent);
+        
+        bytes32 intentId = keccak256(abi.encode(intent));
+        
+        // Verify intent was deposited
+        (bool deposited, , , ) = escrowContract.intentStatus(intentId);
+        assertTrue(deposited, "Intent should be deposited");
+        
+        // Test: NexusSettler can call releaseAfterStep successfully
+        address target = address(mockBridge);
+        uint256 releaseAmount = 500e18;
+        
+        uint256 escrowBalanceBefore = sourceToken.balanceOf(address(escrowContract));
+        uint256 targetBalanceBefore = sourceToken.balanceOf(target);
+        
+        // NexusSettler releases after step 0
+        vm.prank(address(nexusSettler));
+        vm.expectEmit(true, true, true, true);
+        emit BridgeSwapEscrow.StepReleased(intentId, 0, target, releaseAmount);
+        escrowContract.releaseAfterStep(intentId, 0, target, releaseAmount);
+        
+        // Verify state updated properly
+        assertEq(sourceToken.balanceOf(address(escrowContract)), escrowBalanceBefore - releaseAmount, "Escrow balance should decrease");
+        assertEq(sourceToken.balanceOf(target), targetBalanceBefore + releaseAmount, "Target balance should increase");
+        
+        // Verify bitmap shows step 0 complete
+        assertTrue(escrowContract.isStepComplete(intentId, 0), "Step 0 should be complete");
+        
+        // Verify releasedAmounts tracking
+        assertEq(escrowContract.releasedAmounts(intentId), releaseAmount, "Released amount should be tracked");
+        
+        // Test: Second step release also works
+        vm.prank(address(nexusSettler));
+        escrowContract.releaseAfterStep(intentId, 1, address(mockSwapRouter), 300e18);
+        
+        assertTrue(escrowContract.isStepComplete(intentId, 1), "Step 1 should be complete");
+        assertEq(escrowContract.releasedAmounts(intentId), releaseAmount + 300e18, "Released amounts should accumulate");
+    }
+
+    // ============================================================================
+    // Task 7: Failure Scenario Tests
+    // ============================================================================
+
+    /// @notice Test partial execution failure: step 0 succeeds, step 1 fails, verify timeout refund works
+    function testPartialExecutionFailure() public {
+        // Setup: User deposits tokens
+        uint256 depositAmount = 1000e18;
+        
+        vm.prank(user);
+        sourceToken.approve(address(escrowContract), depositAmount);
+        
+        BridgeSwapEscrow.Intent memory intent = BridgeSwapEscrow.Intent({
+            user: user,
+            token: address(sourceToken),
+            amount: depositAmount,
+            deadline: 0,
+            intentId: bytes32(0)
+        });
+        
+        vm.prank(user);
+        escrowContract.depositIntent(intent);
+        
+        bytes32 intentId = keccak256(abi.encode(intent));
+        
+        // Step 0: Release to mockBridge (succeeds)
+        uint256 step0Amount = 400e18;
+        vm.prank(address(nexusSettler));
+        escrowContract.releaseAfterStep(intentId, 0, address(mockBridge), step0Amount);
+        
+        // Verify step 0 complete
+        assertTrue(escrowContract.isStepComplete(intentId, 0), "Step 0 should be complete");
+        assertEq(sourceToken.balanceOf(address(mockBridge)), step0Amount, "Bridge should have received tokens");
+        
+        // Step 1: Try to release more than available balance (should fail)
+        // Escrow has 600e18 remaining, try to release 700e18
+        vm.prank(address(nexusSettler));
+        vm.expectRevert(); // ERC20: transfer amount exceeds balance
+        escrowContract.releaseAfterStep(intentId, 1, address(mockSwapRouter), 700e18);
+        
+        // Verify step 1 is NOT complete
+        assertFalse(escrowContract.isStepComplete(intentId, 1), "Step 1 should not be complete");
+        
+        // Warp past deadline
+        uint256 deadline = escrowContract.getIntent(intentId).deadline;
+        vm.warp(deadline + 1);
+        
+        // User claims refund for remaining amount
+        uint256 userBalanceBefore = sourceToken.balanceOf(user);
+        uint256 escrowBalanceBefore = sourceToken.balanceOf(address(escrowContract));
+        
+        vm.prank(user);
+        vm.expectEmit(true, true, true, true);
+        emit BridgeSwapEscrow.IntentRefunded(intentId, user, address(sourceToken), depositAmount - step0Amount);
+        escrowContract.claimTimeoutRefund(intentId);
+        
+        // Verify refund
+        uint256 expectedRefund = depositAmount - step0Amount; // 600e18
+        assertEq(sourceToken.balanceOf(user), userBalanceBefore + expectedRefund, "User should receive remaining tokens");
+        assertEq(sourceToken.balanceOf(address(escrowContract)), escrowBalanceBefore - expectedRefund, "Escrow should have sent remaining tokens");
+        
+        // Verify step 0 tokens remain with bridge
+        assertEq(sourceToken.balanceOf(address(mockBridge)), step0Amount, "Bridge should still have step 0 tokens");
+        
+        // Verify status
+        (bool deposited, bool refunded, , ) = escrowContract.intentStatus(intentId);
+        assertTrue(deposited, "Should still be deposited");
+        assertTrue(refunded, "Should be refunded");
+    }
+
+    /// @notice Test various invalid intent data scenarios
+    function testInvalidIntentData() public {
+        // Test 1: Deposit with amount = 0 (should revert)
+        BridgeSwapEscrow.Intent memory intentZeroAmount = BridgeSwapEscrow.Intent({
+            user: user,
+            token: address(sourceToken),
+            amount: 0,
+            deadline: 0,
+            intentId: bytes32(0)
+        });
+        
+        vm.prank(user);
+        sourceToken.approve(address(escrowContract), 1000e18);
+        
+        vm.prank(user);
+        vm.expectRevert("Amount must be greater than zero");
+        escrowContract.depositIntent(intentZeroAmount);
+        
+        // Test 2: Deposit with valid amount, then try release with target = address(0)
+        BridgeSwapEscrow.Intent memory intent = BridgeSwapEscrow.Intent({
+            user: user,
+            token: address(sourceToken),
+            amount: 1000e18,
+            deadline: 0,
+            intentId: bytes32(0)
+        });
+        
+        vm.prank(user);
+        escrowContract.depositIntent(intent);
+        
+        bytes32 intentId = keccak256(abi.encode(intent));
+        
+        vm.prank(address(nexusSettler));
+        vm.expectRevert("Invalid target address");
+        escrowContract.releaseAfterStep(intentId, 0, address(0), 500e18);
+        
+        // Test 3: Try release with amount = 0
+        vm.prank(address(nexusSettler));
+        vm.expectRevert("Amount must be greater than zero");
+        escrowContract.releaseAfterStep(intentId, 0, address(mockBridge), 0);
+        
+        // Test 4: Try to deposit same intent twice
+        vm.prank(user);
+        sourceToken.approve(address(escrowContract), 1000e18);
+        
+        vm.prank(user);
+        vm.expectRevert("Intent already deposited");
+        escrowContract.depositIntent(intent);
+        
+        // Test 5: Try to release non-existent intent
+        bytes32 fakeIntentId = keccak256("fake");
+        vm.prank(address(nexusSettler));
+        vm.expectRevert("Intent not deposited");
+        escrowContract.releaseAfterStep(fakeIntentId, 0, address(mockBridge), 500e18);
+    }
+
+    /// @notice Test deadline expiry mid-execution
+    function testDeadlineExpiryMidExecution() public {
+        // Setup: User deposits tokens
+        uint256 depositAmount = 1000e18;
+        
+        vm.prank(user);
+        sourceToken.approve(address(escrowContract), depositAmount);
+        
+        BridgeSwapEscrow.Intent memory intent = BridgeSwapEscrow.Intent({
+            user: user,
+            token: address(sourceToken),
+            amount: depositAmount,
+            deadline: 0,
+            intentId: bytes32(0)
+        });
+        
+        vm.prank(user);
+        escrowContract.depositIntent(intent);
+        
+        bytes32 intentId = keccak256(abi.encode(intent));
+        
+        // Execute step 0 successfully
+        vm.prank(address(nexusSettler));
+        escrowContract.releaseAfterStep(intentId, 0, address(mockBridge), 400e18);
+        
+        assertTrue(escrowContract.isStepComplete(intentId, 0), "Step 0 should be complete");
+        
+        // Warp past deadline
+        uint256 deadline = escrowContract.getIntent(intentId).deadline;
+        vm.warp(deadline + 1);
+        
+        // Try to execute step 1 (should revert with "Deadline passed")
+        vm.prank(address(nexusSettler));
+        vm.expectRevert("Deadline passed");
+        escrowContract.releaseAfterStep(intentId, 1, address(mockSwapRouter), 300e18);
+        
+        // Verify step 1 is NOT complete
+        assertFalse(escrowContract.isStepComplete(intentId, 1), "Step 1 should not be complete");
+        
+        // User can claim refund for remaining amount
+        uint256 userBalanceBefore = sourceToken.balanceOf(user);
+        
+        vm.prank(user);
+        escrowContract.claimTimeoutRefund(intentId);
+        
+        // Verify user received remaining tokens (600e18)
+        uint256 expectedRefund = depositAmount - 400e18;
+        assertEq(sourceToken.balanceOf(user), userBalanceBefore + expectedRefund, "User should receive remaining tokens");
+        
+        // Verify status
+        (bool deposited, bool refunded, , ) = escrowContract.intentStatus(intentId);
+        assertTrue(deposited, "Should still be deposited");
+        assertTrue(refunded, "Should be refunded");
+    }
+
+    // ============================================================================
+    // Task 8: Security Tests
+    // ============================================================================
+
+    /// @notice Test reentrancy protection on deposit
+    function testReentrancyProtectionOnDeposit() public {
+        // Deploy MockReentrantToken
+        MockReentrantToken reentrantToken = new MockReentrantToken("Reentrant Token", "RNT");
+        reentrantToken.mint(user, 1000e18);
+        
+        // Setup reentrancy: token will try to call depositIntent again during transferFrom
+        BridgeSwapEscrow.Intent memory intent = BridgeSwapEscrow.Intent({
+            user: user,
+            token: address(reentrantToken),
+            amount: 500e18,
+            deadline: 0,
+            intentId: bytes32(0)
+        });
+        
+        bytes32 intentId = keccak256(abi.encode(intent));
+        
+        // Configure reentrancy attempt: during transferFrom, try to deposit again
+        bytes memory reentrancyCallData = abi.encodeWithSignature(
+            "depositIntent((address,address,uint256,uint256,bytes32))",
+            intent
+        );
+        reentrantToken.setReentrancyTarget(address(escrowContract), reentrancyCallData);
+        reentrantToken.setAttemptReentrancyOnTransferFrom(true);
+        
+        // User approves escrow
+        vm.prank(user);
+        reentrantToken.approve(address(escrowContract), 1000e18);
+        
+        // Attempt deposit - the reentrancy will be blocked, but the outer call succeeds
+        // because MockReentrantToken catches the revert
+        vm.prank(user);
+        escrowContract.depositIntent(intent);
+        
+        // Verify intent WAS deposited (reentrancy was blocked, but outer call succeeded)
+        // This proves the reentrancy guard worked - the reentrant call was blocked
+        (bool deposited, , , ) = escrowContract.intentStatus(intentId);
+        assertTrue(deposited, "Intent should be deposited - reentrancy was blocked");
+        
+        // Verify only ONE deposit happened (not two)
+        assertEq(reentrantToken.balanceOf(address(escrowContract)), 500e18, "Escrow should have exactly 500 tokens");
+        assertEq(reentrantToken.balanceOf(user), 500e18, "User should have exactly 500 tokens remaining");
+    }
+
+    /// @notice Test reentrancy protection on refund
+    function testReentrancyProtectionOnRefund() public {
+        // Deploy MockReentrantToken
+        MockReentrantToken reentrantToken = new MockReentrantToken("Reentrant Token", "RNT");
+        reentrantToken.mint(user, 1000e18);
+        
+        // User approves and deposits
+        vm.prank(user);
+        reentrantToken.approve(address(escrowContract), 1000e18);
+        
+        BridgeSwapEscrow.Intent memory intent = BridgeSwapEscrow.Intent({
+            user: user,
+            token: address(reentrantToken),
+            amount: 1000e18,
+            deadline: 0,
+            intentId: bytes32(0)
+        });
+        
+        vm.prank(user);
+        escrowContract.depositIntent(intent);
+        
+        bytes32 intentId = keccak256(abi.encode(intent));
+        
+        // Warp past deadline
+        uint256 deadline = escrowContract.getIntent(intentId).deadline;
+        vm.warp(deadline + 1);
+        
+        // Configure reentrancy: during refund transfer, try to claim refund again
+        bytes memory reentrancyCallData = abi.encodeWithSignature("claimTimeoutRefund(bytes32)", intentId);
+        reentrantToken.setReentrancyTarget(address(escrowContract), reentrancyCallData);
+        reentrantToken.setAttemptReentrancyOnTransfer(true);
+        
+        // Attempt refund - the reentrancy will be blocked, but the outer call succeeds
+        // because MockReentrantToken catches the revert
+        vm.prank(user);
+        escrowContract.claimTimeoutRefund(intentId);
+        
+        // Verify intent WAS refunded (reentrancy was blocked, but outer call succeeded)
+        // This proves the reentrancy guard worked - the reentrant call was blocked
+        (bool deposited, bool refunded, , ) = escrowContract.intentStatus(intentId);
+        assertTrue(deposited, "Intent should still be deposited");
+        assertTrue(refunded, "Intent should be refunded - reentrancy was blocked");
+        
+        // Verify only ONE refund happened (not two)
+        assertEq(reentrantToken.balanceOf(user), 1000e18, "User should have all tokens back");
+        assertEq(reentrantToken.balanceOf(address(escrowContract)), 0, "Escrow should have zero tokens");
+    }
+
+    /// @notice Test access control: only settler can release, only user can claim refund
+    function testAccessControl() public {
+        // Setup: User deposits tokens
+        uint256 depositAmount = 1000e18;
+        
+        vm.prank(user);
+        sourceToken.approve(address(escrowContract), depositAmount);
+        
+        BridgeSwapEscrow.Intent memory intent = BridgeSwapEscrow.Intent({
+            user: user,
+            token: address(sourceToken),
+            amount: depositAmount,
+            deadline: 0,
+            intentId: bytes32(0)
+        });
+        
+        vm.prank(user);
+        escrowContract.depositIntent(intent);
+        
+        bytes32 intentId = keccak256(abi.encode(intent));
+        
+        // Test 1: Non-settler tries to releaseAfterStep (should revert)
+        address nonSettler = makeAddr("nonSettler");
+        vm.prank(nonSettler);
+        vm.expectRevert(); // AccessControl: account <account> is missing role <role>
+        escrowContract.releaseAfterStep(intentId, 0, address(mockBridge), 500e18);
+        
+        // Test 2: Settler can release
+        vm.prank(address(nexusSettler));
+        escrowContract.releaseAfterStep(intentId, 0, address(mockBridge), 500e18);
+        assertTrue(escrowContract.isStepComplete(intentId, 0), "Step 0 should be complete");
+        
+        // Test 3: Non-user tries to claim refund (should revert)
+        uint256 deadline = escrowContract.getIntent(intentId).deadline;
+        vm.warp(deadline + 1);
+        
+        address nonUser = makeAddr("nonUser");
+        vm.prank(nonUser);
+        vm.expectRevert("Only user can claim refund");
+        escrowContract.claimTimeoutRefund(intentId);
+        
+        // Test 4: User can claim refund
+        vm.prank(user);
+        escrowContract.claimTimeoutRefund(intentId);
+        
+        (, bool refunded, , ) = escrowContract.intentStatus(intentId);
+        assertTrue(refunded, "Intent should be refunded");
     }
 }
