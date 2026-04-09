@@ -169,6 +169,9 @@ contract AvailEscrow is Initializable, UUPSUpgradeable, ReentrancyGuardTransient
         bytes calldata permit
     ) external payable nonReentrant {
         if (intents[intentId].status != IntentStatus.EMPTY) revert IntentAlreadyExists();
+        if (!registeredSolvers[solver]) revert SolverNotFound();
+        if (!supportedAssets[tokenIn]) revert AssetNotFound();
+        if (!supportedAssets[tokenOut]) revert AssetNotFound();
         if (tokenIn == tokenOut) revert SameAsset();
         if (amountIn == 0) revert ZeroAmount();
         if (amountOutMin == 0) revert ZeroAmount();

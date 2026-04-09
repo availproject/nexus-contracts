@@ -20,6 +20,12 @@
       "rev": "7bf4727aacdbfaa0f36cbd664654d0c9e1dc52bf"
     }
   },
+  "lib/openzeppelin-foundry-upgrades": {
+    "tag": {
+      "name": "v0.4.0",
+      "rev": "cbce1e00305e943aa1661d43f41e5ac72c662b07"
+    }
+  },
   "lib/permit2": {
     "rev": "cc56ad0f3439c502c246fc5cfcc3db92bb8b7219"
   },
