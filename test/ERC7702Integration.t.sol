@@ -15,6 +15,7 @@ import {console2} from "lib/forge-std/src/console2.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 import {MockAavePool} from "./mocks/MockAavePool.sol";
 import {MockAToken} from "./mocks/MockAToken.sol";
+import {ERC7702SignatureHelper} from "./helpers/ERC7702SignatureHelper.sol";
 
 /**
  * @title ERC7702Integration
@@ -96,7 +97,7 @@ contract ERC7702Integration is Test {
         });
 
         // Sign execution
-        bytes32 executionDigest = keccak256(abi.encode(NONCE, calls));
+        bytes32 executionDigest = ERC7702SignatureHelper.computeExecuteDigest(userEOA, NONCE, 0, calls);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPrivateKey, executionDigest);
         bytes memory signature = abi.encodePacked(r, s, v);
 
@@ -106,9 +107,10 @@ contract ERC7702Integration is Test {
 
         // Encode execute call
         bytes memory executeCalldata = abi.encodeWithSignature(
-            "execute((address,uint256,bytes)[],uint256,bytes)",
+            "execute((address,uint256,bytes)[],uint256,uint256,bytes)",
             calls,
             NONCE,
+            uint256(0),
             signature
         );
 
@@ -274,15 +276,16 @@ contract ERC7702Integration is Test {
         
         // User signs the deposit execution
         uint256 depositNonce = 100;
-        bytes32 depositDigest = keccak256(abi.encode(depositNonce, depositCalls));
+        bytes32 depositDigest = ERC7702SignatureHelper.computeExecuteDigest(userEOA, depositNonce, 0, depositCalls);
         (uint8 vDeposit, bytes32 rDeposit, bytes32 sDeposit) = vm.sign(userPrivateKey, depositDigest);
         bytes memory depositSignature = abi.encodePacked(rDeposit, sDeposit, vDeposit);
         
         // Encode the execute call for node 3
         bytes memory node3Data = abi.encodeWithSignature(
-            "execute((address,uint256,bytes)[],uint256,bytes)",
+            "execute((address,uint256,bytes)[],uint256,uint256,bytes)",
             depositCalls,
             depositNonce,
+            uint256(0),
             depositSignature
         );
         
@@ -517,15 +520,16 @@ contract ERC7702Integration is Test {
 
         // ============ STEP 3: Create INVALID Signature (wrong private key) ============
         uint256 wrongPrivateKey = 0xDEADBEEF;
-        bytes32 executionDigest = keccak256(abi.encode(NONCE, calls));
+        bytes32 executionDigest = ERC7702SignatureHelper.computeExecuteDigest(userEOA, NONCE, 0, calls);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(wrongPrivateKey, executionDigest);
         bytes memory invalidSignature = abi.encodePacked(r, s, v);
 
         // ============ STEP 4: Encode the execute() Call ============
         bytes memory executeCalldata = abi.encodeWithSignature(
-            "execute((address,uint256,bytes)[],uint256,bytes)",
+            "execute((address,uint256,bytes)[],uint256,uint256,bytes)",
             calls,
             NONCE,
+            uint256(0),
             invalidSignature
         );
 
@@ -622,15 +626,16 @@ contract ERC7702Integration is Test {
         });
 
         // ============ STEP 3: User Signs ============
-        bytes32 executionDigest = keccak256(abi.encode(NONCE, calls));
+        bytes32 executionDigest = ERC7702SignatureHelper.computeExecuteDigest(userEOA, NONCE, 0, calls);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPrivateKey, executionDigest);
         bytes memory signature = abi.encodePacked(r, s, v);
 
         // ============ STEP 4: Encode the execute() Call ============
         bytes memory executeCalldata = abi.encodeWithSignature(
-            "execute((address,uint256,bytes)[],uint256,bytes)",
+            "execute((address,uint256,bytes)[],uint256,uint256,bytes)",
             calls,
             NONCE,
+            uint256(0),
             signature
         );
 
@@ -740,15 +745,16 @@ contract ERC7702Integration is Test {
         });
 
         // Sign
-        bytes32 executionDigest = keccak256(abi.encode(NONCE, calls));
+        bytes32 executionDigest = ERC7702SignatureHelper.computeExecuteDigest(userEOA, NONCE, 0, calls);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPrivateKey, executionDigest);
         bytes memory signature = abi.encodePacked(r, s, v);
 
         // Encode execute call
         bytes memory executeCalldata = abi.encodeWithSignature(
-            "execute((address,uint256,bytes)[],uint256,bytes)",
+            "execute((address,uint256,bytes)[],uint256,uint256,bytes)",
             calls,
             NONCE,
+            uint256(0),
             signature
         );
 
@@ -839,15 +845,16 @@ contract ERC7702Integration is Test {
         });
 
         // Sign with NONCE
-        bytes32 executionDigest = keccak256(abi.encode(NONCE, calls));
+        bytes32 executionDigest = ERC7702SignatureHelper.computeExecuteDigest(userEOA, NONCE, 0, calls);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPrivateKey, executionDigest);
         bytes memory signature = abi.encodePacked(r, s, v);
 
         // Encode execute call
         bytes memory executeCalldata = abi.encodeWithSignature(
-            "execute((address,uint256,bytes)[],uint256,bytes)",
+            "execute((address,uint256,bytes)[],uint256,uint256,bytes)",
             calls,
             NONCE,
+            uint256(0),
             signature
         );
 

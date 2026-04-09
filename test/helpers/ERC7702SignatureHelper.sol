@@ -5,18 +5,28 @@ import {IERC7821} from "lib/openzeppelin-contracts/contracts/interfaces/draft-IE
 import {EIP7702Utils} from "lib/openzeppelin-contracts/contracts/account/utils/EIP7702Utils.sol";
 import {ERC7579Utils, Execution} from "lib/openzeppelin-contracts/contracts/account/utils/draft-ERC7579Utils.sol";
 import {ECDSA} from "lib/openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol";
+import {EIP712} from "lib/openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
 
 import {Vm} from "lib/forge-std/src/Vm.sol";
 
 /**
  * @title ERC7702SignatureHelper
  * @notice Utility library for generating EIP-7702 delegated execution signatures
- * @dev Used for testing ERC7702Delegator and intent-based execution
+ * @dev Used for testing ERC7702Delegator and intent-based execution.
+ *      Computes EIP-712 typed data hashes matching the contract's verification.
  */
 library ERC7702SignatureHelper {
     using ERC7579Utils for *;
 
     Vm private constant vm1 = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
+
+    /// @notice EIP-712 typehash for Execute struct (must match ERC7702Delegator)
+    bytes32 internal constant EXECUTE_TYPEHASH =
+        keccak256("Execute(uint256 nonce,uint256 deadline,Execution[] calls)Execution(address target,uint256 value,bytes callData)");
+
+    /// @notice EIP-712 typehash for Execution struct
+    bytes32 internal constant EXECUTION_TYPEHASH =
+        keccak256("Execution(address target,uint256 value,bytes callData)");
 
     /**
      * @dev Generates an ECDSA signature for the given digest
@@ -46,6 +56,59 @@ library ERC7702SignatureHelper {
             v := byte(0, mload(add(signature, 0x60)))
         }
         signer = ecrecover(digest, v, r, s);
+    }
+
+    /**
+     * @dev Hash an array of Execution structs per EIP-712
+     * @param calls Array of Execution structs
+     * @return The keccak256 hash of the encoded array
+     */
+    function hashExecutions(Execution[] memory calls) internal pure returns (bytes32) {
+        bytes32[] memory hashedCalls = new bytes32[](calls.length);
+        for (uint256 i = 0; i < calls.length; i++) {
+            hashedCalls[i] = keccak256(abi.encode(
+                EXECUTION_TYPEHASH,
+                calls[i].target,
+                calls[i].value,
+                keccak256(calls[i].callData)
+            ));
+        }
+        return keccak256(abi.encodePacked(hashedCalls));
+    }
+
+    /**
+     * @dev Computes the EIP-712 typed data hash for execute(calls, nonce, deadline, signature)
+     * @param delegator The ERC7702Delegator contract address (verifying contract for EIP-712 domain)
+     * @param nonce The nonce value
+     * @param deadline The deadline timestamp (0 = no expiry)
+     * @param calls The array of Execution structs
+     * @return digest The EIP-712 typed data hash ready for signing
+     */
+    function computeExecuteDigest(
+        address delegator,
+        uint256 nonce,
+        uint256 deadline,
+        Execution[] memory calls
+    ) internal view returns (bytes32) {
+        // Compute struct hash per EIP-712
+        bytes32 structHash = keccak256(abi.encode(
+            EXECUTE_TYPEHASH,
+            nonce,
+            deadline,
+            hashExecutions(calls)
+        ));
+
+        // Compute domain separator (must match contract's EIP712("ERC7702Delegator", "1"))
+        bytes32 domainSeparator = keccak256(abi.encode(
+            keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+            keccak256(bytes("ERC7702Delegator")),
+            keccak256(bytes("1")),
+            block.chainid,
+            delegator
+        ));
+
+        // EIP-712 typed data hash
+        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
     }
 
     /**
