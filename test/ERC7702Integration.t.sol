@@ -2,14 +2,15 @@
 pragma solidity 0.8.26;
 
 import {Test} from "lib/forge-std/src/Test.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {NexusSettler} from "../src/NexusSettler.sol";
 import {ERC7702Delegator} from "../src/ERC7702Delegator.sol";
 import {INexusSettler} from "../src/interfaces/INexusSettler.sol";
-import {IERC7821} from "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC7821.sol";
-import {Execution} from "lib/openzeppelin-contracts/contracts/interfaces/draft-IERC7579.sol";
-import {ECDSA} from "lib/openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol";
-import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
-import {ERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
+import {IERC7821} from "@openzeppelin/contracts/interfaces/draft-IERC7821.sol";
+import {Execution} from "@openzeppelin/contracts/interfaces/draft-IERC7579.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {console2} from "lib/forge-std/src/console2.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 import {MockAavePool} from "./mocks/MockAavePool.sol";
@@ -52,8 +53,13 @@ contract ERC7702Integration is Test {
         escrow = makeAddr("escrow");
         vm.deal(escrow, 10 ether);
 
-        // Deploy NexusSettler (UNCHANGED - this is the key point!)
-        nexusSettler = new NexusSettler(escrow);
+        // Deploy NexusSettler behind UUPS proxy
+        NexusSettler impl = new NexusSettler();
+        ERC1967Proxy proxy = new ERC1967Proxy(
+            address(impl),
+            abi.encodeCall(NexusSettler.initialize, (escrow, address(this)))
+        );
+        nexusSettler = NexusSettler(address(proxy));
 
         // Deploy ERC7702Delegator (NEW contract from T2)
         delegator = new ERC7702Delegator();

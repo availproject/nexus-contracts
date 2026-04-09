@@ -20,7 +20,7 @@ contract NexusSettlerFuzz is NexusSettlerTestBase {
 
     function setUp() public override {
         super.setUp();
-        harness = new NexusSettlerHarness(escrow);
+        harness = new NexusSettlerHarness();
     }
 
     // ============================================================
@@ -1222,12 +1222,12 @@ error ChainIdNotFoundHarness(uint16 chainId);
  * @notice Test harness to expose private _executePath function
  * @dev Copies the _executePath logic from NexusSettler for testing
  */
-contract NexusSettlerHarness is NexusSettler {
+contract NexusSettlerHarness {
     using Address for address;
 
     uint256 private constant MAX_PATH_LENGTH = 100;
 
-    constructor(address escrow) NexusSettler(escrow) {}
+    error InvalidPath();
 
     /**
      * @notice Exposed _executePath for fuzz testing

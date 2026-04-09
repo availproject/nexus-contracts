@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import "lib/forge-std/src/Test.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import "../../src/NexusSettler.sol";
 import "../../src/interfaces/INexusSettler.sol";
 
@@ -16,11 +17,21 @@ abstract contract NexusSettlerTestBase is Test {
     address public user;
     uint256 public userPrivateKey;
 
+    /// Deploys NexusSettler behind an ERC1967 proxy
+    function _deployNexusSettler(address escrow_, address owner_) internal returns (NexusSettler) {
+        NexusSettler impl = new NexusSettler();
+        ERC1967Proxy proxy = new ERC1967Proxy(
+            address(impl),
+            abi.encodeCall(NexusSettler.initialize, (escrow_, owner_))
+        );
+        return NexusSettler(address(proxy));
+    }
+
     /// Contract deployment with escrow mock
     function setUp() public virtual {
         escrow = makeAddr("escrow");
         (user, userPrivateKey) = makeAddrAndKey("user");
-        nexusSettler = new NexusSettler(escrow);
+        nexusSettler = _deployNexusSettler(escrow, address(this));
     }
 
     /// Computes EIP-712 digest for signing

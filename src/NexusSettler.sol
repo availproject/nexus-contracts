@@ -1,26 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.26;
 
-import {EIP712} from "lib/openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
-import {ECDSA} from "lib/openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol";
-import {ReentrancyGuardTransient} from "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuardTransient.sol";
-import {Address} from "lib/openzeppelin-contracts/contracts/utils/Address.sol";
+import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {INexusSettler} from "./interfaces/INexusSettler.sol";
 
 /**
  * @title NexusSettler
- * @notice Zero-storage cross-chain intent settlement
+ * @notice Zero-storage cross-chain intent settlement (UUPS upgradeable)
  * @author Rachit Anand Srivastava (@privacy_prophet)
  * @dev All node data lives in calldata—only completion flags touch storage.
  *      Two mappings track state: created[rootHash] and intentStates[completionKey].
  *      IntentState packs completed + bitmap into slot 1, nextHash in slot 2.
  *      True resumability: resumed calls only pass remaining nodes, not the full path.
  */
-contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
+contract NexusSettler is
+    Initializable,
+    ReentrancyGuardTransient,
+    EIP712Upgradeable,
+    OwnableUpgradeable,
+    UUPSUpgradeable,
+    INexusSettler
+{
     using Address for address;
 
     /// Escrow contract for fund locking
-    address public immutable escrow;
+    address public escrow;
 
     /// Prevents replay: each rootHash can only be created once
     mapping(bytes32 => bool) public created;
@@ -34,8 +44,22 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
     /// Prevents gas griefing from unbounded paths
     uint256 private constant MAX_PATH_LENGTH = 100;
 
-    constructor(address newEscrow) EIP712("NexusSettler", "2") {
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    /**
+     * @notice Initializes the contract (replaces constructor for proxy pattern)
+     * @param newEscrow Address of the escrow contract
+     * @param owner_ Address of the contract owner (controls upgrades)
+     */
+    function initialize(address newEscrow, address owner_) external initializer {
         if (newEscrow == address(0)) revert InvalidTarget();
+
+        __EIP712_init("NexusSettler", "2");
+        __Ownable_init(owner_);
+
         escrow = newEscrow;
     }
 
@@ -237,4 +261,9 @@ contract NexusSettler is ReentrancyGuardTransient, EIP712, INexusSettler {
     function _executeAction(address target, bytes calldata data) private {
         target.functionCall(data);
     }
+
+    /**
+     * @dev Only the owner can authorize upgrades
+     */
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 }
